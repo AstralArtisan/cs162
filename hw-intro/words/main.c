@@ -46,7 +46,22 @@ WordCount *word_counts = NULL;
  */
 int num_words(FILE* infile) {
   int num_words = 0;
-
+  int is_word = 0;
+  int ch;
+  while ((ch = fgetc(infile)) != EOF) {
+    if (isalpha(ch)) {
+      if (is_word == 0) {
+        is_word = 1;
+      }
+      else if (is_word == 1) {
+        num_words++;
+        is_word = -1;
+      }
+    }
+    else {
+        is_word = 0;
+    }
+  }
   return num_words;
 }
 
@@ -62,6 +77,26 @@ int num_words(FILE* infile) {
  * and 0 otherwise.
  */
 int count_words(WordCount **wclist, FILE *infile) {
+  if (wclist == NULL || infile == NULL) return 1;
+  init_words(wclist);
+  int ch;
+  char word[64];
+  int i = 0;
+  while ((ch = fgetc(infile)) != EOF) {
+    if (isalpha(ch)) {
+      word[i++] = tolower(ch);
+    } else {
+      if (i > 1) {
+        word[i] = '\0';
+        add_word(wclist, word);
+      }
+      i = 0;
+    }
+  }
+  if (i > 1) {
+    word[i] = '\0';
+    add_word(wclist, word);
+  }
   return 0;
 }
 
@@ -70,7 +105,10 @@ int count_words(WordCount **wclist, FILE *infile) {
  * Useful function: strcmp().
  */
 static bool wordcount_less(const WordCount *wc1, const WordCount *wc2) {
-  return 0;
+    if (wc1->count != wc2->count) {
+        return wc1->count < wc2->count;  
+    }
+    return strcmp(wc1->word, wc2->word) < 0; 
 }
 
 // In trying times, displays a helpful message.
@@ -95,7 +133,7 @@ int main (int argc, char *argv[]) {
   bool freq_mode = false;
 
   FILE *infile = NULL;
-
+  (void) infile;
   // Variables for command line argument parsing
   int i;
   static struct option long_options[] =
@@ -137,15 +175,24 @@ int main (int argc, char *argv[]) {
     // At least one file specified. Useful functions: fopen(), fclose().
     // The first file can be found at argv[optind]. The last file can be
     // found at argv[argc-1].
+    infile = fopen(argv[optind], "r");
+    if (infile == NULL) {
+      fprintf("Error opening file.\n");
+      return 1;
+    }
   }
 
   if (count_mode) {
+    total_words = num_words(infile);
     printf("The total number of words is: %i\n", total_words);
   } else {
+    count_words(&word_counts, infile);
     wordcount_sort(&word_counts, wordcount_less);
-
     printf("The frequencies of each word are: \n");
     fprint_words(word_counts, stdout);
-}
+  }
+  if (infile != stdin) {
+    fclose(infile);
+  }
   return 0;
 }

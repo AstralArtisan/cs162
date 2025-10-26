@@ -21,9 +21,10 @@
 #include "threads/vaddr.h"
 
 static struct semaphore temporary;
+static struct semaphore sema_load;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
-static bool load(const char* file_name, void (**eip)(void), void** esp);
+static bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char** argv);
 bool setup_thread(void (**eip)(void), void** esp);
 
 /* Initializes user programs in the system by ensuring the main
@@ -52,18 +53,21 @@ void userprog_init(void) {
    process id, or TID_ERROR if the thread cannot be created. */
 pid_t process_execute(const char* file_name) {
   char* fn_copy;
+  char* saveptr;
   tid_t tid;
-
   sema_init(&temporary, 0);
+  sema_init(&sema_load, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
   if (fn_copy == NULL)
     return TID_ERROR;
   strlcpy(fn_copy, file_name, PGSIZE);
-
+  /* Save the program name. */
+  char* program_name = strtok_r(fn_copy, " ", &saveptr);
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create(program_name, PRI_DEFAULT, start_process, fn_copy);
+  sema_down(&sema_load);
   if (tid == TID_ERROR)
     palloc_free_page(fn_copy);
   return tid;
@@ -76,6 +80,16 @@ static void start_process(void* file_name_) {
   struct thread* t = thread_current();
   struct intr_frame if_;
   bool success, pcb_success;
+
+  /* Split the command line into arguments. */
+  int argc = 0;
+  char* argv[32];
+  char* saveptr;
+  char* token = strtok_r(file_name, " ", &saveptr);
+  while (token != NULL) {
+    argv[argc++] = token;
+    token = strtok_r(NULL, " ", &saveptr);
+  }
 
   /* Allocate process control block */
   struct process* new_pcb = malloc(sizeof(struct process));
@@ -99,7 +113,7 @@ static void start_process(void* file_name_) {
     if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
-    success = load(file_name, &if_.eip, &if_.esp);
+    success = load(argv[0], &if_.eip, &if_.esp, argc, argv);
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -111,14 +125,13 @@ static void start_process(void* file_name_) {
     t->pcb = NULL;
     free(pcb_to_free);
   }
-
+  sema_up(&sema_load);
   /* Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
   if (!success) {
     sema_up(&temporary);
     thread_exit();
   }
-
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -259,7 +272,7 @@ struct Elf32_Phdr {
 #define PF_W 2 /* Writable. */
 #define PF_R 4 /* Readable. */
 
-static bool setup_stack(void** esp);
+static bool setup_stack(void** esp, int argc, char** argv);
 static bool validate_segment(const struct Elf32_Phdr*, struct file*);
 static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t read_bytes,
                          uint32_t zero_bytes, bool writable);
@@ -268,7 +281,7 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
    Stores the executable's entry point into *EIP
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
-bool load(const char* file_name, void (**eip)(void), void** esp) {
+bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char** argv) {
   struct thread* t = thread_current();
   struct Elf32_Ehdr ehdr;
   struct file* file = NULL;
@@ -348,7 +361,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   }
 
   /* Set up stack. */
-  if (!setup_stack(esp))
+  if (!setup_stack(esp, argc, argv))
     goto done;
 
   /* Start address. */
@@ -465,17 +478,72 @@ static bool load_segment(struct file* file, off_t ofs, uint8_t* upage, uint32_t 
 
 /* Create a minimal stack by mapping a zeroed page at the top of
    user virtual memory. */
-static bool setup_stack(void** esp) {
+static bool setup_stack(void** esp, int argc, char** argv) {
   uint8_t* kpage;
   bool success = false;
 
   kpage = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kpage != NULL) {
     success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
-    if (success)
-      *esp = PHYS_BASE;
-    else
+    if (!success) {
       palloc_free_page(kpage);
+      return false;
+    }
+
+    /* We will build the stack in the newly mapped page.  User addresses
+       in this page range are [PHYS_BASE - PGSIZE, PHYS_BASE).  To write
+       into the user page we use the kernel mapping kpage with an offset
+       of (user_addr - (PHYS_BASE - PGSIZE)). */
+    uint8_t* user_page_bottom = (uint8_t*)(PHYS_BASE - PGSIZE);
+    uint8_t* user_sp = (uint8_t*)PHYS_BASE;
+    char* arg_ptrs[32];
+
+    /* Copy argument strings onto the stack (from last to first). */
+    for (int i = argc - 1; i >= 0; i--) {
+      size_t len = strlen(argv[i]) + 1; /* include NUL */
+      user_sp -= len;
+      /* Compute kernel-side address and copy */
+      memcpy(kpage + (user_sp - user_page_bottom), argv[i], len);
+      arg_ptrs[i] = (char*)user_sp;
+    }
+
+    /* Word-align the stack to a multiple of 4 bytes. */
+    while ((uintptr_t)user_sp % 4 != 0) {
+      user_sp -= 1;
+      *(kpage + (user_sp - user_page_bottom)) = 0;
+    }
+
+    /* Push a null sentinel for argv[argc]. */
+    user_sp -= sizeof(char*);
+    memset(kpage + (user_sp - user_page_bottom), 0, sizeof(char*));
+
+    /* Push addresses of the argument strings (argv pointers) in reverse
+       order so that argv[0] is at the lowest address in the array. */
+    for (int i = argc - 1; i >= 0; i--) {
+      user_sp -= sizeof(char*);
+      char* ptr_val = arg_ptrs[i];
+      memcpy(kpage + (user_sp - user_page_bottom), &ptr_val, sizeof(char*));
+    }
+
+    /* Save argv (pointer to argv[0]). */
+    char** argv_addr = (char**)user_sp;
+
+    /* Push argv (char**). */
+    user_sp -= sizeof(char**);
+    char** tmp_argv_addr = argv_addr;
+    memcpy(kpage + (user_sp - user_page_bottom), &tmp_argv_addr, sizeof(char**));
+
+    /* Push argc. */
+    user_sp -= sizeof(int);
+    int tmp_argc = argc;
+    memcpy(kpage + (user_sp - user_page_bottom), &tmp_argc, sizeof(int));
+
+    /* Push fake return address. */
+    user_sp -= sizeof(void*);
+    memset(kpage + (user_sp - user_page_bottom), 0, sizeof(void*));
+
+    /* Finalize stack pointer for the user process. */
+    *esp = (void*)user_sp;
   }
   return success;
 }

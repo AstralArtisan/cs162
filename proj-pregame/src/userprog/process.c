@@ -100,6 +100,11 @@ static void start_process(void* file_name_) {
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(file_name, &if_.eip, &if_.esp);
+    if_.esp -= 20;
+    uint32_t* esp = (uint32_t*)if_.esp;
+    *esp = 0;           // fake return address
+    *(esp + 1) = 1;     // argc = 1
+    *(esp + 2) = 0;     // argv = NULL (no args)
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -472,8 +477,57 @@ static bool setup_stack(void** esp) {
   kpage = palloc_get_page(PAL_USER | PAL_ZERO);
   if (kpage != NULL) {
     success = install_page(((uint8_t*)PHYS_BASE) - PGSIZE, kpage, true);
-    if (success)
-      *esp = PHYS_BASE;
+    if (success) {
+      *esp = PHYS_BASE - 16;
+
+    //   char *token, *save_ptr;
+    //   char *argv[32];     // limit to 32 args for simplicity
+    //   int argc = 0;
+
+    //   for (token = strtok_r(file_name, " ", &save_ptr);
+    //        token != NULL;
+    //        token = strtok_r(NULL, " ", &save_ptr)) {
+    //      argv[argc++] = token;
+    //   }
+
+    //   // Push argument strings onto stack (in reverse)
+    //   char *arg_addr[32];
+    //   for (int i = argc - 1; i >= 0; i--) {
+    //       size_t len = strlen(argv[i]) + 1;
+    //       *esp -= len;
+    //       memcpy(*esp, argv[i], len);
+    //       arg_addr[i] = *esp;
+    //   }
+
+    //   // Word align the stack
+    //   while ((uintptr_t) *esp % 4 != 0) {
+    //       *esp -= 1;
+    //       *(uint8_t*) *esp = 0;
+    //   }
+
+    //   // Step 4: Push argv pointers (addresses of strings)
+    //   *esp -= 4;
+    //   *(uint32_t*) *esp = 0;  // null terminator for argv
+
+    //   for (int i = argc - 1; i >= 0; i--) {
+    //       *esp -= 4;
+    //       *(uint32_t*) *esp = (uint32_t) arg_addr[i];
+    //   }
+
+    //   // Step 5: Push argv (pointer to first argv)
+    //   uint32_t argv_ptr = (uint32_t) *esp;
+    //   *esp -= 4;
+    //   *(uint32_t*) *esp = argv_ptr;
+
+    //   // Step 6: Push argc
+    //   *esp -= 4;
+    //   *(uint32_t*) *esp = argc;
+
+    //   // Step 7: Push fake return address
+    //   *esp -= 4;
+    //   *(uint32_t*) *esp = 0;
+    // }
+    } 
     else
       palloc_free_page(kpage);
   }

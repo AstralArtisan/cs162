@@ -29,7 +29,20 @@ struct process {
   struct thread* main_thread; /* Pointer to main thread */
 };
 
+/* Stores the status of a child process. */
+struct child {
+   pid_t pid;
+   int exit_status;
+   bool exited;
+   bool waiting;
+   bool killed;
+   struct semaphore wait_sema;
+   struct list_elem elem;
+};
+
 void userprog_init(void);
+
+struct child* find_child(pid_t pid);
 
 pid_t process_execute(const char* file_name);
 int process_wait(pid_t);

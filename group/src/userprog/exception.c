@@ -77,6 +77,11 @@ static void kill(struct intr_frame* f) {
          expected.  Kill the user process.  */
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
+      struct thread* t = thread_current();
+      if (t->child_process != NULL) {
+        t->child_process->exited = true;
+        t->child_process->killed = true;
+      }
       intr_dump_frame(f);
       process_exit();
       NOT_REACHED();
@@ -115,16 +120,16 @@ static void page_fault(struct intr_frame* f) {
   void* fault_addr; /* Fault address. */
 
   /* Obtain faulting address, the virtual address that was
-     accessed to cause the fault.  It may point to code or to
-     data.  It is not necessarily the address of the instruction
-     that caused the fault (that's f->eip).
-     See [IA32-v2a] "MOV--Move to/from Control Registers" and
-     [IA32-v3a] 5.15 "Interrupt 14--Page Fault Exception
-     (#PF)". */
+      accessed to cause the fault.  It may point to code or to
+      data.  It is not necessarily the address of the instruction
+      that caused the fault (that's f->eip).
+      See [IA32-v2a] "MOV--Move to/from Control Registers" and
+      [IA32-v3a] 5.15 "Interrupt 14--Page Fault Exception
+      (#PF)". */
   asm("movl %%cr2, %0" : "=r"(fault_addr));
 
   /* Turn interrupts back on (they were only off so that we could
-     be assured of reading CR2 before it changed). */
+      be assured of reading CR2 before it changed). */
   intr_enable();
 
   /* Count page faults. */
@@ -135,9 +140,16 @@ static void page_fault(struct intr_frame* f) {
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
+  if (user) {
+    exit(-1);
+  } else {
+    f->eip = (void *) f->eax;
+    f->eax = 0xffffffff;
+  }
+
   /* To implement virtual memory, delete the rest of the function
-     body, and replace it with code that brings in the page to
-     which fault_addr refers. */
+      body, and replace it with code that brings in the page to
+      which fault_addr refers. */
   printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
          not_present ? "not present" : "rights violation", write ? "writing" : "reading",
          user ? "user" : "kernel");

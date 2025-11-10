@@ -207,7 +207,22 @@ uint32_t* active_pd(void) {
   return ptov(pd);
 }
 
-/* Seom page table changes can cause the CPU's translation
+bool pagedir_copy(uint32_t* dst, uint32_t* src) {
+  for (uint32_t* src_upage = (uint32_t*)0; src_upage < (uint32_t*)PHYS_BASE; src_upage += PGSIZE) {
+    uint32_t* src_kpage = pagedir_get_page(src, src_upage);
+    if (src_kpage == NULL) continue;
+    uint32_t* dst_kpage = palloc_get_page(PAL_USER);
+    if (dst_kpage == NULL) return false;
+    memcpy(dst_kpage, src_kpage, PGSIZE);
+    if (!pagedir_set_page(dst, src_upage, dst_kpage, true)) {
+      palloc_free_page(dst_kpage);
+      return false;
+    }
+  }
+  return true;
+}
+
+/* Some page table changes can cause the CPU's translation
    lookaside buffer (TLB) to become out-of-sync with the page
    table.  When this happens, we have to "invalidate" the TLB by
    re-activating it.

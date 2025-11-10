@@ -5,6 +5,8 @@
 #include "userprog/process.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "userprog/syscall.h"  // optional
+void Exit(int status);
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -141,7 +143,7 @@ static void page_fault(struct intr_frame* f) {
   user = (f->error_code & PF_U) != 0;
 
   if (user) {
-    exit(-1);
+    Exit(-1);
   } else {
     f->eip = (void *) f->eax;
     f->eax = 0xffffffff;

@@ -20,8 +20,6 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 
-static struct semaphore temporary;
-static struct semaphore sema_load;
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char** argv);
@@ -47,6 +45,21 @@ void userprog_init(void) {
   ASSERT(success);
 }
 
+/* Initializes a child process structure and adds it
+   to the current thread's list of children. */
+struct child* child_init() {
+  struct child* child_proc = malloc(sizeof(struct child));
+  child_proc->pid = TID_ERROR;
+  child_proc->exit_status = -1;
+  child_proc->waiting = false;
+  child_proc->killed = false;
+  child_proc->exited = false;
+  sema_init(&child_proc->wait_sema, 0);
+  sema_init(&child_proc->load_sema, 0);
+  list_push_back(&thread_current()->child_list, &child_proc->elem);
+  return child_proc;
+}
+
 struct child* find_child(pid_t pid) {
   struct thread* t = thread_current();
   struct list_elem* e;
@@ -58,6 +71,12 @@ struct child* find_child(pid_t pid) {
   return NULL;
 }
 
+/* Helper structure for exec to send something to child process.*/
+struct exec_helper {
+  char* file_name;
+  struct child* child_proc;
+};
+
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
@@ -65,8 +84,6 @@ struct child* find_child(pid_t pid) {
 pid_t process_execute(const char* file_name) {
   char* fn_copy;
   tid_t tid;
-  sema_init(&temporary, 0);
-  sema_init(&sema_load, 0);
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
@@ -80,22 +97,28 @@ pid_t process_execute(const char* file_name) {
     i++;
   }
   program_name[i] = '\0';
-  /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create(program_name, PRI_DEFAULT, start_process, fn_copy);
-  sema_down(&sema_load);
-  if (tid == TID_ERROR)
+
+  /* Create and initialize a child process structure. */
+  struct child* child_proc = child_init();
+  if (child_proc == NULL) {
     palloc_free_page(fn_copy);
-  else {
-    /* Create and initialize a child process structure. */
-    struct child* child_proc = malloc(sizeof(struct child));
+    free(child_proc);
+    return TID_ERROR;
+  }
+
+  struct exec_helper* helper = malloc(sizeof(struct exec_helper));
+  helper->file_name = fn_copy;
+  helper->child_proc = child_proc;
+  
+  /* Create a new thread to execute FILE_NAME. */
+  tid = thread_create(program_name, PRI_DEFAULT, start_process, helper);
+  sema_down(&child_proc->load_sema); // Wait for child to load
+  if (tid == TID_ERROR) {
+    list_remove(&child_proc->elem);
+    free(child_proc);
+    palloc_free_page(fn_copy);
+  } else {
     child_proc->pid = tid;
-    child_proc->exit_status = -1;
-    child_proc->waiting = false;
-    child_proc->killed = false;
-    child_proc->exited = false;
-    sema_init(&child_proc->wait_sema, 0);
-    list_init(&thread_current()->child_list);
-    list_push_back(&thread_current()->child_list, &child_proc->elem);
   }
   return tid;
 }
@@ -103,8 +126,12 @@ pid_t process_execute(const char* file_name) {
 /* A thread function that loads a user process and starts it
    running. */
 static void start_process(void* file_name_) {
-  char* file_name = (char*)file_name_;
+  struct exec_helper* helper = (struct exec_helper*)file_name_;
+  char* file_name = helper->file_name;
+  struct child* child_proc = helper->child_proc;
+  free(helper);
   struct thread* t = thread_current();
+  t->child_process = child_proc;
   struct intr_frame if_;
   bool success, pcb_success;
 
@@ -156,11 +183,10 @@ static void start_process(void* file_name_) {
   /* Clean up. Exit on failure or jump to userspace */
   palloc_free_page(file_name);
   if (!success) {
-    sema_up(&sema_load);
-    sema_up(&temporary);
+    sema_up(&child_proc->load_sema);
     thread_exit();
   }
-  sema_up(&sema_load);
+  sema_up(&child_proc->load_sema);
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -181,10 +207,9 @@ static void start_process(void* file_name_) {
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int process_wait(pid_t child_pid UNUSED) {
-  sema_down(&temporary);
+
   struct child* child = find_child(child_pid);
   if (child == NULL || child->waiting) {
-    sema_up(&temporary);
     return -1;
   }
   child->waiting = true;
@@ -195,13 +220,11 @@ int process_wait(pid_t child_pid UNUSED) {
     child->exit_status = -1;
     list_remove(&child->elem);
     free(child);
-    sema_up(&temporary);
     return -1;
   }
   int status = child->exit_status;
   list_remove(&child->elem);
   free(child);
-  sema_up(&temporary);
   return status;
 }
 
@@ -218,11 +241,14 @@ void process_exit(void) {
   }
 
   /* Free the current process's child processes. */
-  for (e = list_begin(&cur->child_list); e != list_end(&cur->child_list);) {
-    cp = list_entry(e, struct child, elem);
-    e = list_next(e);
-    list_remove(&cp->elem);
-    free(cp);
+  if (!list_empty(&cur->child_list)) {
+    for (e = list_begin(&cur->child_list); e != list_end(&cur->child_list);) {
+      cp = list_entry(e, struct child, elem);
+      struct list_elem* next = list_next(e);
+      list_remove(&cp->elem);
+      free(cp);
+      e = next;
+    }
   }
   
   if (cur->child_process) {
@@ -253,7 +279,6 @@ void process_exit(void) {
   struct process* pcb_to_free = cur->pcb;
   cur->pcb = NULL;
   free(pcb_to_free);
-  sema_up(&temporary);
   thread_exit();
 }
 

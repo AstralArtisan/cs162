@@ -37,11 +37,13 @@ struct child {
    bool waiting;
    bool killed;
    struct semaphore wait_sema;
+   struct semaphore load_sema;
    struct list_elem elem;
 };
 
 void userprog_init(void);
 
+struct child* child_init(void);
 struct child* find_child(pid_t pid);
 
 pid_t process_execute(const char* file_name);

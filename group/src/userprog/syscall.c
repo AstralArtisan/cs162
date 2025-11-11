@@ -16,7 +16,9 @@ static bool put_user(uint8_t* udst, uint8_t byte);
 void check_user_vaddr(const void* vaddr, bool write);
 void* user_to_kernel(void* uaddr);
 void Exit(int status);
-pid_t fork(void);
+static void fork_process(void* addr);
+pid_t fork(struct intr_frame* f);
+void write(struct intr_frame *f);
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
 
@@ -55,7 +57,11 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
 
   if (args[0] == SYS_FORK) {
-    f->eax = fork();
+    f->eax = fork(f);
+  }
+
+  if (args[0] == SYS_WRITE) {
+    write(f);
   }
 }
 
@@ -71,6 +77,7 @@ void Exit(int status) {
 struct fork_helper {
   struct thread* parent;
   struct child* child_proc;
+  struct intr_frame if_;
 };
 
 static void fork_process(void* addr) {
@@ -78,8 +85,8 @@ static void fork_process(void* addr) {
   struct thread* parent = helper->parent;
   struct child* child_proc = helper->child_proc;
   struct thread* child = thread_current();
+  struct intr_frame* if_ = &helper->if_;
   child->child_process = child_proc;
-  free(helper);
   bool success, pcb_success, cp_success;
 
   /* Allocate process control block */
@@ -100,14 +107,13 @@ static void fork_process(void* addr) {
     child->pcb->pagedir = pagedir_create();
     if (child->pcb->pagedir == NULL)
       goto done;
-    cp_success = pagedir_copy(parent->pcb->pagedir, child->pcb->pagedir);
+    cp_success = pagedir_copy(child->pcb->pagedir, parent->pcb->pagedir);
     if (!cp_success) goto done;
     process_activate();
   }
   /* Set up the child's intr_frame */
   if (success) {
-    memcpy(&child->if_, &parent->if_, sizeof(struct intr_frame));
-    child->if_.eax = 0; // Child's fork() return value is 0
+    if_->eax = 0; // Child's fork() return value is 0
   }
 
   /* Handle failure with succesful PCB malloc. Must free the PCB */
@@ -120,24 +126,23 @@ static void fork_process(void* addr) {
     free(pcb_to_free);
   }
 
-  done:
+done:
   if (!success) {
     sema_up(&child_proc->load_sema);
     thread_exit();
   }
   sema_up(&child_proc->load_sema);
-  
-  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(&child->if_) : "memory");
+  asm volatile("movl %0, %%esp; jmp intr_exit" : : "g"(if_) : "memory");
   NOT_REACHED();
-
 }
 
-pid_t fork(void) {
+pid_t fork(struct intr_frame* f) {
   struct thread* cur = thread_current();
   struct child* child_proc = child_init();
   struct fork_helper* helper = malloc(sizeof(struct fork_helper));
   helper->parent = cur;
   helper->child_proc = child_proc;
+  memcpy(&helper->if_, f, sizeof *f);
   if (child_proc == NULL) {
     free(helper);
     return -1;
@@ -154,6 +159,21 @@ pid_t fork(void) {
   sema_down(&child_proc->load_sema);
   return tid;
 }
+
+void write(struct intr_frame *f) {
+  int *args = f->esp;     
+  int fd = args[1];     
+  const char *buffer = (const char *)args[2]; 
+  unsigned size = args[3]; 
+
+  if (fd == 1) {
+    putbuf(buffer, size);
+    f->eax = size;       
+  } else {
+    f->eax = -1;       
+  }
+}
+
 
 /* Reads a byte at user virtual address UADDR.
    UADDR must be below PHYS_BASE.

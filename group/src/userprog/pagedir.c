@@ -207,20 +207,34 @@ uint32_t* active_pd(void) {
   return ptov(pd);
 }
 
-bool pagedir_copy(uint32_t* dst, uint32_t* src) {
-  for (uint32_t* src_upage = (uint32_t*)0; src_upage < (uint32_t*)PHYS_BASE; src_upage += PGSIZE) {
-    uint32_t* src_kpage = pagedir_get_page(src, src_upage);
-    if (src_kpage == NULL) continue;
-    uint32_t* dst_kpage = palloc_get_page(PAL_USER);
-    if (dst_kpage == NULL) return false;
-    memcpy(dst_kpage, src_kpage, PGSIZE);
-    if (!pagedir_set_page(dst, src_upage, dst_kpage, true)) {
-      palloc_free_page(dst_kpage);
-      return false;
+bool pagedir_copy(uint32_t *dst, uint32_t *src) {
+  for (uint32_t pd_idx = 0; pd_idx < pd_no(PHYS_BASE); pd_idx++) {
+    uint32_t *pde = src + pd_idx;
+    if (*pde & PTE_P) {
+      uint32_t *pt = pde_get_pt(*pde);
+      for (int pt_idx = 0; pt_idx < 1024; pt_idx++) {
+        uint32_t pte = pt[pt_idx];
+        if (pte & PTE_P) {
+          void *upage = ((pd_idx << 22) | (pt_idx << 12));
+          void *kpage = pagedir_get_page(src, upage);
+          if (kpage == NULL) continue;
+
+          void *new_page = palloc_get_page(PAL_USER);
+          if (new_page == NULL) return false;
+          memcpy(new_page, kpage, PGSIZE);
+
+          bool writable = (pte & PTE_W) != 0;
+          if (!pagedir_set_page(dst, upage, new_page, writable)) {
+            palloc_free_page(new_page);
+            return false;
+          }
+        }
+      }
     }
   }
   return true;
 }
+
 
 /* Some page table changes can cause the CPU's translation
    lookaside buffer (TLB) to become out-of-sync with the page

@@ -595,10 +595,19 @@ static bool setup_stack(void** esp, int argc, char** argv) {
     }
 
     /* Word-align the stack to a multiple of 4 bytes. */
-    while ((uintptr_t)user_sp % 4 != 0) {
-      user_sp -= 1;
-      *(kpage + (user_sp - user_page_bottom)) = 0;
-    }
+    size_t meta_size =
+        sizeof(char*)              /* NULL sentinel for argv[argc] */
+      + argc * sizeof(char*)       /* argv[i] pointers */
+      + sizeof(char**)             /* argv */
+      + sizeof(int)                /* argc */
+      + sizeof(void*);             /* fake return address */
+
+    const size_t kStartOverhead = 2 * sizeof(void*) + sizeof(void*); /* 12B */
+    uintptr_t want = (uintptr_t)user_sp - meta_size - kStartOverhead;
+    size_t pad = want & 0xF;
+
+    user_sp -= pad;
+    memset(kpage + (user_sp - user_page_bottom), 0, pad);
 
     /* Push a null sentinel for argv[argc]. */
     user_sp -= sizeof(char*);

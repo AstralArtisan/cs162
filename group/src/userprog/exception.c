@@ -93,6 +93,10 @@ static void kill(struct intr_frame* f) {
          Kernel code shouldn't throw exceptions.  (Page faults
          may cause kernel exceptions--but they shouldn't arrive
          here.)  Panic the kernel to make the point.  */
+      if (t->child_process != NULL) {
+        t->child_process->exited = true;
+        t->child_process->killed = true;
+      }
       intr_dump_frame(f);
       PANIC("Kernel bug - unexpected interrupt in kernel");
 
@@ -147,6 +151,7 @@ static void page_fault(struct intr_frame* f) {
   } else {
     f->eip = (void *) f->eax;
     f->eax = 0xffffffff;
+    return;
   }
 
   /* To implement virtual memory, delete the rest of the function

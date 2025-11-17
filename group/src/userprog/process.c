@@ -54,6 +54,7 @@ struct child* child_init() {
   child_proc->waiting = false;
   child_proc->killed = false;
   child_proc->exited = false;
+  child_proc->loaded = false;
   sema_init(&child_proc->wait_sema, 0);
   sema_init(&child_proc->load_sema, 0);
   list_push_back(&thread_current()->child_list, &child_proc->elem);
@@ -113,10 +114,10 @@ pid_t process_execute(const char* file_name) {
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create(program_name, PRI_DEFAULT, start_process, helper);
   sema_down(&child_proc->load_sema); // Wait for child to load
+  if (!child_proc->loaded) tid = TID_ERROR;
   if (tid == TID_ERROR) {
     list_remove(&child_proc->elem);
     free(child_proc);
-    palloc_free_page(fn_copy);
   } else {
     child_proc->pid = tid;
   }
@@ -186,6 +187,7 @@ static void start_process(void* file_name_) {
     sema_up(&child_proc->load_sema);
     thread_exit();
   }
+  child_proc->loaded = true;
   sema_up(&child_proc->load_sema);
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in

@@ -36,6 +36,7 @@ struct child {
    bool exited;
    bool waiting;
    bool killed;
+   bool loaded;
    struct semaphore wait_sema;
    struct semaphore load_sema;
    struct list_elem elem;

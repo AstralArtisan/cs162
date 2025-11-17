@@ -5,6 +5,7 @@
 #include "threads/thread.h"
 #include "userprog/process.h"
 #include "devices/shutdown.h"
+#include "devices/input.h"
 #include "threads/vaddr.h"
 #include "userprog/pagedir.h"
 #include "threads/malloc.h"
@@ -14,18 +15,22 @@ static void syscall_handler(struct intr_frame*);
 static int get_user(const uint8_t* uaddr);
 static bool put_user(uint8_t* udst, uint8_t byte);
 void check_user_vaddr(const void* vaddr, bool write);
+void check_user_string(const char* str);
 void* user_to_kernel(void* uaddr);
 void get_args(struct intr_frame* f, uint32_t* args, int num);
 void Exit(int status);
 static void fork_process(void* addr);
 pid_t fork(struct intr_frame* f);
-void write(struct intr_frame *f);
+void write(struct intr_frame *f, uint32_t* args);
+void read(struct intr_frame *f, uint32_t* args);
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   check_user_vaddr(f->esp, false);
-  uint32_t* args = (uint32_t*)f->esp;
+  uint32_t* ptr = user_to_kernel(f->esp);
+  uint32_t args[4];
+  args[0] = *ptr;
 
   /*
    * The following print statement, if uncommented, will print out the syscall
@@ -42,31 +47,40 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     Exit(args[1]);
   }
 
-  if (args[0] == SYS_PRACTICE) {
+  else if (args[0] == SYS_PRACTICE) {
     get_args(f, args, 1);
     f->eax = args[1] + 1;
   }
 
-  if (args[0] == SYS_HALT) {
+  else if (args[0] == SYS_HALT) {
     shutdown_power_off();
   }
 
-  if (args[0] == SYS_EXEC) {
+  else if (args[0] == SYS_EXEC) {
     get_args(f, args, 1);
+    check_user_string((const char*)args[1]);
     f->eax = process_execute((const char*)args[1]);
   }
 
-  if (args[0] == SYS_WAIT) {
+  else if (args[0] == SYS_WAIT) {
     get_args(f, args, 1);
     f->eax = process_wait((pid_t)args[1]);
   }
 
-  if (args[0] == SYS_FORK) {
+  else if (args[0] == SYS_FORK) {
     f->eax = fork(f);
   }
 
-  if (args[0] == SYS_WRITE) {
-    write(f);
+  else if (args[0] == SYS_READ) {
+    read(f, args);
+  }
+
+  else if (args[0] == SYS_WRITE) {
+    write(f, args);
+  }
+
+  else {
+    Exit(-1);
   }
 }
 
@@ -165,8 +179,8 @@ pid_t fork(struct intr_frame* f) {
   return tid;
 }
 
-void write(struct intr_frame *f) {
-  int *args = f->esp;     
+void write(struct intr_frame *f, uint32_t* args) {
+  get_args(f, args, 4);  
   int fd = args[1];     
   const char *buffer = (const char *)args[2]; 
   unsigned size = args[3]; 
@@ -176,6 +190,26 @@ void write(struct intr_frame *f) {
     f->eax = size;       
   } else {
     f->eax = -1;       
+  }
+}
+
+void read(struct intr_frame *f, uint32_t* args) {
+  get_args(f, args, 3);
+  int fd = args[1];
+  uint8_t* buffer = (uint8_t*)args[2];
+  unsigned size = args[3];
+
+  if (fd == 0) {
+    unsigned i;
+    for (i = 0; i < size; i++) {
+      check_user_vaddr(buffer + i, true);
+      if (!put_user(buffer + i, input_getc())) {
+        Exit(-1);
+      }
+    }
+    f->eax = size;
+  } else {
+    f->eax = -1;
   }
 }
 
@@ -211,16 +245,42 @@ void check_user_vaddr(const void* vaddr, bool write) {
   }
 }
 
+void check_user_string(const char* str) {
+  const uint8_t* ptr = (const uint8_t*)str;
+  check_user_vaddr((void*)ptr, false);
+  while (ptr++) {
+    int get = get_user(ptr);
+    if (get == -1) Exit(-1);  // invalid
+    if (get == 0) break;  // '/0'
+  }
+}
+
 void get_args(struct intr_frame* f, uint32_t* args, int num) {
-  for (int i = 0; i < num; i++) {
-    check_user_vaddr(f->esp + 4 + i * 4, false);
-    args[i] = *((uint32_t*)(f->esp + 4 + i * 4));
+  for (int i = 1; i <= num; i++) {
+    uint8_t* uaddr = (uint8_t*)f->esp + i * 4;
+    uint32_t value = 0;
+
+    /* Safely read 4 bytes for this argument from the user stack.
+       Each byte must be a valid user address and readable. */
+    for (int j = 0; j < 4; j++) {
+      uint8_t* byte_addr = uaddr + j;
+      if (!is_user_vaddr(byte_addr)) {
+        Exit(-1);
+      }
+      int byte = get_user(byte_addr);
+      if (byte == -1) {
+        Exit(-1);
+      }
+      value |= ((uint32_t)byte & 0xFF) << (8 * j);
+    }
+
+    args[i] = value;
   }
 }
 
 /* Converts a user virtual address to a kernel virtual address. */
 void* user_to_kernel(void* uaddr) {
-  void* kaddr = pagedir_get_page(thread_current()->pcb->pagedir,uaddr);
+  void* kaddr = pagedir_get_page(thread_current()->pcb->pagedir, uaddr);
   if (kaddr == NULL) Exit(-1);
   return kaddr;
 }

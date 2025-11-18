@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
-
+#include "threads/interrupt.h"
 /* States in a thread's life cycle. */
 enum thread_status {
   THREAD_RUNNING, /* Running thread. */
@@ -92,6 +92,9 @@ struct thread {
 
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
+  struct list child_list; /* List of child processes */
+  struct child* child_process; /* Pointer to child process struct */
+  //tid_t parent_tid;          /* TID of parent thread */
 
 #ifdef USERPROG
   /* Owned by process.c. */

@@ -595,21 +595,26 @@ static bool setup_stack(void** esp, int argc, char** argv) {
       memcpy(kpage + (user_sp - user_page_bottom), argv[i], len);
       arg_ptrs[i] = (char*)user_sp;
     }
+    
+      /* Do word align. */
+	    /* Compute size of metadata we will push after argument strings. */
+	    size_t meta_size =
+	        sizeof(char*)              /* NULL sentinel for argv[argc] */
+	      + argc * sizeof(char*)       /* argv[i] pointers */
+	      + sizeof(char**)             /* argv */
+	      + sizeof(int)                /* argc */
+	      + sizeof(void*);             /* fake return address */
+	
+	    /* Extra words consumed on entry to user code. */
+	    const size_t kStartOverhead = 2 * sizeof(void*) + sizeof(void*); /* 12 bytes */
 
-    /* Word-align the stack to a multiple of 4 bytes. */
-    size_t meta_size =
-        sizeof(char*)              /* NULL sentinel for argv[argc] */
-      + argc * sizeof(char*)       /* argv[i] pointers */
-      + sizeof(char**)             /* argv */
-      + sizeof(int)                /* argc */
-      + sizeof(void*);             /* fake return address */
-
-    const size_t kStartOverhead = 2 * sizeof(void*) + sizeof(void*); /* 12B */
-    uintptr_t want = (uintptr_t)user_sp - meta_size - kStartOverhead;
-    size_t pad = want & 0xF;
-
-    user_sp -= pad;
-    memset(kpage + (user_sp - user_page_bottom), 0, pad);
+	    /* Address ESP would have after pushing meta_size + overhead. */
+	    uintptr_t want = (uintptr_t)user_sp - meta_size - kStartOverhead;
+	    size_t pad = want & 0xF;
+	
+	    /* Pad so final ESP is 16-byte aligned. */
+	    user_sp -= pad;
+	    memset(kpage + (user_sp - user_page_bottom), 0, pad);
 
     /* Push a null sentinel for argv[argc]. */
     user_sp -= sizeof(char*);

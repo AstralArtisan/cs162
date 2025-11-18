@@ -1,0 +1,13 @@
+{
+    "files.associations": {
+        "main.h": "c",
+        "syscall-nr.h": "c",
+        "cstdlib": "c",
+        "memory": "c",
+        "new": "c",
+        "string.h": "c",
+        "interrupt.h": "c",
+        "process.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
+}

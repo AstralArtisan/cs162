@@ -16,7 +16,7 @@ static int get_user(const uint8_t* uaddr);
 static bool put_user(uint8_t* udst, uint8_t byte);
 void check_user_vaddr(const void* vaddr, bool write);
 void check_user_string(const char* str);
-void* user_to_kernel(void* uaddr);
+uint32_t get_syscall_number(struct intr_frame* f);
 void get_args(struct intr_frame* f, uint32_t* args, int num);
 void Exit(int status);
 static void fork_process(void* addr);
@@ -28,9 +28,8 @@ void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   check_user_vaddr(f->esp, false);
-  uint32_t* ptr = user_to_kernel(f->esp);
   uint32_t args[4];
-  args[0] = *ptr;
+  args[0] = get_syscall_number(f);
 
   /*
    * The following print statement, if uncommented, will print out the syscall
@@ -80,7 +79,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
 
   else {
-    Exit(-1);
+    Exit(-1); // Syscall number is not valid.
   }
 }
 
@@ -158,15 +157,13 @@ done:
 pid_t fork(struct intr_frame* f) {
   struct thread* cur = thread_current();
   struct child* child_proc = child_init();
+  if (child_proc == NULL)  return -1;
   struct fork_helper* helper = malloc(sizeof(struct fork_helper));
   helper->parent = cur;
   helper->child_proc = child_proc;
   memcpy(&helper->if_, f, sizeof *f);
-  if (child_proc == NULL) {
-    free(helper);
-    return -1;
-  }
   tid_t tid = thread_create(cur->name, cur->priority, fork_process, helper);
+  sema_down(&child_proc->load_sema);
   if (tid == TID_ERROR) {
     list_remove(&child_proc->elem);
     free(child_proc);
@@ -175,12 +172,11 @@ pid_t fork(struct intr_frame* f) {
   } else {
     child_proc->pid = tid;
   }
-  sema_down(&child_proc->load_sema);
   return tid;
 }
 
 void write(struct intr_frame *f, uint32_t* args) {
-  get_args(f, args, 4);  
+  get_args(f, args, 3);  
   int fd = args[1];     
   const char *buffer = (const char *)args[2]; 
   unsigned size = args[3]; 
@@ -245,6 +241,7 @@ void check_user_vaddr(const void* vaddr, bool write) {
   }
 }
 
+/* Checks if a user string is valid. If not, terminates the process. */
 void check_user_string(const char* str) {
   const uint8_t* ptr = (const uint8_t*)str;
   check_user_vaddr((void*)ptr, false);
@@ -255,6 +252,25 @@ void check_user_string(const char* str) {
   }
 }
 
+/* Get the syscall number from the user stack. */
+uint32_t get_syscall_number(struct intr_frame* f) {
+  uint8_t* uaddr = (uint8_t*)f->esp;
+  uint32_t value = 0;
+  for (int i = 0; i < 4; i++) {
+    uint8_t* byte_addr = uaddr + i;
+    if (!is_user_vaddr(byte_addr)) {
+      Exit(-1);
+    }
+    int byte = get_user(byte_addr);
+    if (byte == -1) {
+      Exit(-1);
+    }
+    value |= ((uint32_t)byte & 0xFF) << (8 * i);
+  }
+  return value;
+}
+
+/* Get syscall arguments from the user stack. */
 void get_args(struct intr_frame* f, uint32_t* args, int num) {
   for (int i = 1; i <= num; i++) {
     uint8_t* uaddr = (uint8_t*)f->esp + i * 4;
@@ -273,14 +289,6 @@ void get_args(struct intr_frame* f, uint32_t* args, int num) {
       }
       value |= ((uint32_t)byte & 0xFF) << (8 * j);
     }
-
     args[i] = value;
   }
-}
-
-/* Converts a user virtual address to a kernel virtual address. */
-void* user_to_kernel(void* uaddr) {
-  void* kaddr = pagedir_get_page(thread_current()->pcb->pagedir, uaddr);
-  if (kaddr == NULL) Exit(-1);
-  return kaddr;
 }

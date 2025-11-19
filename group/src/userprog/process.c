@@ -204,12 +204,8 @@ static void start_process(void* file_name_) {
    exception), returns -1.  If child_pid is invalid or if it was not a
    child of the calling process, or if process_wait() has already
    been successfully called for the given PID, returns -1
-   immediately, without waiting.
-
-   This function will be implemented in problem 2-2.  For now, it
-   does nothing. */
+   immediately, without waiting. */
 int process_wait(pid_t child_pid UNUSED) {
-
   struct child* child = find_child(child_pid);
   if (child == NULL || child->waiting) {
     return -1;

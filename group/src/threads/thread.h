@@ -96,6 +96,7 @@ struct thread {
   struct child* child_process; /* Pointer to child process struct */
   int next_fd; /* Next file descriptor to be assigned */
   struct list open_files; /* List of open files */
+  struct file* executable_file; /* File the thread is executing */
 
 #ifdef USERPROG
   /* Owned by process.c. */

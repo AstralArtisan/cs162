@@ -258,7 +258,9 @@ void process_exit(void) {
     sema_up(&cur->child_process->wait_sema);
   }
 
+  /* Close all open files. */
   if (!list_empty(&cur->open_files)) {
+    lock_acquire(&filesys_lock);
     struct list_elem* e;
     for (e = list_begin(&cur->open_files); e != list_end(&cur->open_files);) {
       struct pfile* pf = list_entry(e, struct pfile, elem);
@@ -268,6 +270,12 @@ void process_exit(void) {
       free(pf);
       e = next;
     }
+    lock_release(&filesys_lock);
+  }
+
+  if (cur->executable_file != NULL) {
+    file_allow_write(cur->executable_file);
+    file_close(cur->executable_file);
   }
 
   /* Destroy the current process's page directory and switch back
@@ -442,6 +450,8 @@ bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char*
     printf("load: %s: open failed\n", file_name);
     goto done;
   }
+  file_deny_write(file);
+  t->executable_file = file;
 
   /* Read and verify executable header. */
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
@@ -512,7 +522,6 @@ bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char*
 
 done:
   /* We arrive here whether the load is successful or not. */
-  file_close(file);
   lock_release(&filesys_lock);
   return success;
 }

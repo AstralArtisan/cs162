@@ -45,7 +45,7 @@ struct child {
 /* Tracks open files for a process. */
 struct pfile {
    struct file* file;
-   int fd; // file discriptor
+   int fd; // file descriptor
    struct list_elem elem;
 };
 

@@ -188,6 +188,28 @@ static void fork_process(void* addr) {
     if (!cp_success) goto done;
     process_activate();
   }
+
+  /* Copy parent's file descriptors. */
+  if (success) {
+    lock_acquire(&filesys_lock);
+    struct list_elem* e;
+    for (e = list_begin(&parent->open_files); e != list_end(&parent->open_files); e = list_next(e)) {
+      struct pfile* parent_pf = list_entry(e, struct pfile, elem);
+      struct file* file = parent_pf->file;
+      struct pfile* child_pf = malloc(sizeof(struct pfile));
+      if (child_pf == NULL || file == NULL) {
+        success = false;
+        lock_release(&filesys_lock);
+        goto done;
+      }
+      file_ref_increase(file);
+      child_pf->file = file;
+      child_pf->fd = child->next_fd++;
+      list_push_back(&child->open_files, &child_pf->elem);
+    }
+    lock_release(&filesys_lock);
+  }
+
   /* Set up the child's intr_frame */
   if (success) {
     if_->eax = 0; // Child's fork() return value is 0
@@ -276,7 +298,7 @@ int filesize(int fd) {
   return size;
 }
 
-int read (int fd, void* buffer, unsigned size) {
+int read(int fd, void* buffer, unsigned size) {
   if (fd == STDIN_FILENO) {
     uint8_t* buf = (uint8_t*) buffer;
     for (unsigned i = 0; i < size; i++) {

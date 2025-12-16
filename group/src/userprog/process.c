@@ -19,12 +19,13 @@
 #include "threads/synch.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "userprog/syscall.h"
 
 static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char** argv);
 bool setup_thread(void (**eip)(void), void** esp);
-
+struct lock filesys_lock;
 /* Initializes user programs in the system by ensuring the main
    thread has a minimal PCB so that it can execute and wait for
    the first user process. Any additions to the PCB should be also
@@ -61,6 +62,9 @@ struct child* child_init() {
   return child_proc;
 }
 
+/* Searches the current thread's list of children
+   for a child process with pid PID. Returns a pointer
+   to the child process structure if found, NULL otherwise. */
 struct child* find_child(pid_t pid) {
   struct thread* t = thread_current();
   struct list_elem* e;
@@ -254,6 +258,18 @@ void process_exit(void) {
     sema_up(&cur->child_process->wait_sema);
   }
 
+  if (!list_empty(&cur->open_files)) {
+    struct list_elem* e;
+    for (e = list_begin(&cur->open_files); e != list_end(&cur->open_files);) {
+      struct pfile* pf = list_entry(e, struct pfile, elem);
+      struct list_elem* next = list_next(e);
+      file_close(pf->file);
+      list_remove(&pf->elem);
+      free(pf);
+      e = next;
+    }
+  }
+
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = cur->pcb->pagedir;
@@ -294,6 +310,45 @@ void process_activate(void) {
   /* Set thread's kernel stack for use in processing interrupts.
      This does nothing if this is not a user process. */
   tss_update();
+}
+
+/* Allocates a file descriptor to an open file.*/
+int process_open_file(struct file* f) {
+  struct thread* t = thread_current();
+  struct pfile* pf = malloc(sizeof(struct pfile));
+  if (pf == NULL) return -1;
+  pf->file = f;
+  pf->fd = t->next_fd++;
+  list_push_back(&t->open_files, &pf->elem);
+  return pf->fd;
+}
+
+/* Retrieves the file associated with a given file descriptor.*/
+struct file* process_get_file(int fd) {
+  struct thread* t = thread_current();
+  struct list_elem* e;
+  for (e = list_begin(&t->open_files); e != list_end(&t->open_files); e = list_next(e)) {
+    struct pfile* pf = list_entry(e, struct pfile, elem);
+    if (pf->fd == fd) {
+      return pf->file;
+    }
+  }
+  return NULL;
+}
+
+/* Closes the file associated with a given file descriptor.*/
+void process_close_file(int fd) {
+  struct thread* t = thread_current();
+  struct list_elem* e;
+  for (e = list_begin(&t->open_files); e != list_end(&t->open_files); e = list_next(e)) {
+    struct pfile* pf = list_entry(e, struct pfile, elem);
+    if (pf->fd == fd) {
+      file_close(pf->file);
+      list_remove(&pf->elem);
+      free(pf);
+      return;
+    }
+  }
 }
 
 /* We load ELF binaries.  The following definitions are taken
@@ -381,6 +436,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char*
   process_activate();
 
   /* Open executable file. */
+  lock_acquire(&filesys_lock);
   file = filesys_open(file_name);
   if (file == NULL) {
     printf("load: %s: open failed\n", file_name);
@@ -457,6 +513,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char*
 done:
   /* We arrive here whether the load is successful or not. */
   file_close(file);
+  lock_release(&filesys_lock);
   return success;
 }
 

@@ -94,7 +94,8 @@ struct thread {
   struct list_elem elem; /* List element. */
   struct list child_list; /* List of child processes */
   struct child* child_process; /* Pointer to child process struct */
-  //tid_t parent_tid;          /* TID of parent thread */
+  int next_fd; /* Next file descriptor to be assigned */
+  struct list open_files; /* List of open files */
 
 #ifdef USERPROG
   /* Owned by process.c. */

@@ -70,6 +70,7 @@ static void kill(struct intr_frame* f) {
      the kernel.  Real Unix-like operating systems pass most
      exceptions back to the process via signals, but we don't
      implement them. */
+  struct thread* t = thread_current();
 
   /* The interrupt frame's code segment value tells us where the
      exception originated. */
@@ -79,7 +80,6 @@ static void kill(struct intr_frame* f) {
          expected.  Kill the user process.  */
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
-      struct thread* t = thread_current();
       if (t->child_process != NULL) {
         t->child_process->exited = true;
         t->child_process->killed = true;

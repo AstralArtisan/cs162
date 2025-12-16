@@ -10,21 +10,34 @@
 #include "userprog/pagedir.h"
 #include "threads/malloc.h"
 #include <string.h>
+#include "threads/synch.h"
+#include "filesys/filesys.h"
+#include "filesys/file.h"
 
-static void syscall_handler(struct intr_frame*);
+static void syscall_handler(struct intr_frame* f);
 static int get_user(const uint8_t* uaddr);
 static bool put_user(uint8_t* udst, uint8_t byte);
 void check_user_vaddr(const void* vaddr, bool write);
 void check_user_string(const char* str);
+void check_user_buffer(const void* buffer, unsigned size, bool write);
 uint32_t get_syscall_number(struct intr_frame* f);
 void get_args(struct intr_frame* f, uint32_t* args, int num);
 void Exit(int status);
-static void fork_process(void* addr);
 pid_t fork(struct intr_frame* f);
-void write(struct intr_frame *f, uint32_t* args);
-void read(struct intr_frame *f, uint32_t* args);
+bool create(const char* file, unsigned initial_size);
+bool remove(const char* file);
+int open(const char* file);
+int filesize(int fd);
+int read(int fd, void* buffer, unsigned size);
+int write(int fd, const void* buffer, unsigned size);
+void seek(int fd, unsigned position);
+int tell(int fd);
+void close(int fd);
 
-void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
+void syscall_init(void) { 
+  lock_init(&filesys_lock);
+  intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); 
+}
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
   check_user_vaddr(f->esp, false);
@@ -70,12 +83,54 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     f->eax = fork(f);
   }
 
+  else if (args[0] == SYS_CREATE) {
+    get_args(f, args, 2);
+    check_user_string((const char*) args[1]);
+    f->eax = create((const char*) args[1], (unsigned) args[2]);
+  }
+
+  else if (args[0] == SYS_REMOVE) {
+    get_args(f, args, 1);
+    check_user_string((const char*) args[1]);
+    f->eax = remove((const char*) args[1]);
+  }
+
+  else if (args[0] == SYS_OPEN) {
+    get_args(f, args, 1);
+    check_user_string((const char*) args[1]);
+    f->eax = open((const char*) args[1]);
+  }
+
+  else if (args[0] == SYS_FILESIZE) {
+    get_args(f, args, 1);
+    f->eax = filesize(args[1]);
+  }
+
   else if (args[0] == SYS_READ) {
-    read(f, args);
+    get_args(f, args, 3);
+    check_user_buffer((const void*) args[2], (unsigned) args[3], true);
+    f->eax = read(args[1], (void*) args[2], (unsigned) args[3]);
   }
 
   else if (args[0] == SYS_WRITE) {
-    write(f, args);
+    get_args(f, args, 3);
+    check_user_buffer((const void*) args[2], (unsigned) args[3], false);
+    f->eax = write(args[1], (const void*) args[2], (unsigned) args[3]);
+  }
+
+  else if (args[0] == SYS_SEEK) {
+    get_args(f, args, 2);
+    seek(args[1], (unsigned) args[2]);
+  }
+
+  else if (args[0] == SYS_TELL) {
+    get_args(f, args, 1);
+    f->eax = tell(args[1]);
+  }
+
+  else if (args[0] == SYS_CLOSE) {
+    get_args(f, args, 1);
+    close(args[1]);
   }
 
   else {
@@ -83,6 +138,9 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   }
 }
 
+/* Specific system call implementations. */
+
+/* exit implementation. */
 void Exit(int status) {
   struct child* cp = thread_current()->child_process;
   if (cp != NULL) {
@@ -92,6 +150,7 @@ void Exit(int status) {
   process_exit();
 }
 
+/* fork implementation helper struct and function. */
 struct fork_helper {
   struct thread* parent;
   struct child* child_proc;
@@ -175,40 +234,121 @@ pid_t fork(struct intr_frame* f) {
   return tid;
 }
 
-void write(struct intr_frame *f, uint32_t* args) {
-  get_args(f, args, 3);  
-  int fd = args[1];     
-  const char *buffer = (const char *)args[2]; 
-  unsigned size = args[3]; 
+/* File operation syscalls implementation. */
 
-  if (fd == 1) {
-    putbuf(buffer, size);
-    f->eax = size;       
-  } else {
-    f->eax = -1;       
-  }
+bool create(const char* file, unsigned initial_size) {
+  lock_acquire(&filesys_lock);
+  bool result;
+  result = filesys_create(file, initial_size);
+  lock_release(&filesys_lock);
+  return result;
 }
 
-void read(struct intr_frame *f, uint32_t* args) {
-  get_args(f, args, 3);
-  int fd = args[1];
-  uint8_t* buffer = (uint8_t*)args[2];
-  unsigned size = args[3];
+bool remove(const char* file) {
+  lock_acquire(&filesys_lock);
+  bool result;
+  result = filesys_remove(file);
+  lock_release(&filesys_lock);
+  return result;
+}
 
-  if (fd == 0) {
-    unsigned i;
-    for (i = 0; i < size; i++) {
-      check_user_vaddr(buffer + i, true);
-      if (!put_user(buffer + i, input_getc())) {
-        Exit(-1);
-      }
+int open(const char* file) {
+  lock_acquire(&filesys_lock);
+  int fd = -1;
+  struct file* f = filesys_open(file);
+  if (!f) {
+    lock_release(&filesys_lock);
+    return fd;
+  }
+  fd = process_open_file(f);
+  lock_release(&filesys_lock);
+  return fd;
+}
+
+int filesize(int fd) {
+  lock_acquire(&filesys_lock);
+  int size = -1;
+  struct file* f = process_get_file(fd);
+  if (f != NULL) {
+    size = file_length(f);
+  }
+  lock_release(&filesys_lock);
+  return size;
+}
+
+int read (int fd, void* buffer, unsigned size) {
+  if (fd == STDIN_FILENO) {
+    uint8_t* buf = (uint8_t*) buffer;
+    for (unsigned i = 0; i < size; i++) {
+      buf[i] = input_getc();
     }
-    f->eax = size;
-  } else {
-    f->eax = -1;
+    return size;
   }
+  lock_acquire(&filesys_lock);
+  struct file* f = process_get_file(fd);
+  if (f == NULL) {
+    lock_release(&filesys_lock);
+    return -1;
+  }
+  int bytes_read = file_read(f, buffer, size);
+  lock_release(&filesys_lock);
+  return bytes_read;
 }
 
+int write(int fd, const void* buffer, unsigned size) {
+  if (fd == STDOUT_FILENO) {
+    #define STDOUT_CHUNK 256
+    const char* buf = (const char*) buffer;
+    unsigned remaining = size;
+    while (remaining > 0) {
+      unsigned chunk = remaining > STDOUT_CHUNK ? STDOUT_CHUNK : remaining;
+      putbuf(buf, chunk);
+      buf += chunk;
+      remaining -= chunk;
+    }
+    return size;
+  }
+  lock_acquire(&filesys_lock);
+  struct file* f = process_get_file(fd);
+  if (f == NULL) {
+    lock_release(&filesys_lock);
+    return -1;
+  }
+  int bytes_written = file_write(f, buffer, size);
+  lock_release(&filesys_lock);
+  return bytes_written;
+}
+
+void seek(int fd, unsigned position) {
+  lock_acquire(&filesys_lock);
+  struct file* f = process_get_file(fd);
+  if (f != NULL) {
+    file_seek(f, position);
+  }
+  lock_release(&filesys_lock);
+}
+
+int tell(int fd) {
+  lock_acquire(&filesys_lock);
+  int position = -1;
+  struct file* f = process_get_file(fd);
+  if (f != NULL) {
+    position = file_tell(f);
+  }
+  lock_release(&filesys_lock);
+  return position;
+}
+
+void close(int fd) {
+  lock_acquire(&filesys_lock);
+  struct file* f = process_get_file(fd);
+  if (f != NULL) {
+    process_close_file(fd);
+  }
+  lock_release(&filesys_lock);
+}
+
+/* Helper functions. */
 
 /* Reads a byte at user virtual address UADDR.
    UADDR must be below PHYS_BASE.
@@ -249,6 +389,14 @@ void check_user_string(const char* str) {
     int get = get_user(ptr);
     if (get == -1) Exit(-1);  // invalid
     if (get == 0) break;  // '/0'
+  }
+}
+
+/* Checks if a user buffer for read and write is valid. */
+void check_user_buffer(const void* buffer, unsigned size, bool write) {
+  void* ptr = (void*)buffer;
+  for (unsigned i = 0; i < size; i++) {
+    check_user_vaddr(ptr + i, write);
   }
 }
 

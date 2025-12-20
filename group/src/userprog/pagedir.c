@@ -207,20 +207,22 @@ uint32_t* active_pd(void) {
   return ptov(pd);
 }
 
-bool pagedir_copy(uint32_t *dst, uint32_t *src) {
+bool pagedir_copy(uint32_t* dst, uint32_t* src) {
   for (uint32_t pd_idx = 0; pd_idx < pd_no(PHYS_BASE); pd_idx++) {
-    uint32_t *pde = src + pd_idx;
+    uint32_t* pde = src + pd_idx;
     if (*pde & PTE_P) {
-      uint32_t *pt = pde_get_pt(*pde);
+      uint32_t* pt = pde_get_pt(*pde);
       for (int pt_idx = 0; pt_idx < 1024; pt_idx++) {
         uint32_t pte = pt[pt_idx];
         if (pte & PTE_P) {
-          void *upage = ((pd_idx << 22) | (pt_idx << 12));
-          void *kpage = pagedir_get_page(src, upage);
-          if (kpage == NULL) continue;
+          void* upage = ((pd_idx << 22) | (pt_idx << 12));
+          void* kpage = pagedir_get_page(src, upage);
+          if (kpage == NULL)
+            continue;
 
-          void *new_page = palloc_get_page(PAL_USER);
-          if (new_page == NULL) return false;
+          void* new_page = palloc_get_page(PAL_USER);
+          if (new_page == NULL)
+            return false;
           memcpy(new_page, kpage, PGSIZE);
 
           bool writable = (pte & PTE_W) != 0;
@@ -234,7 +236,6 @@ bool pagedir_copy(uint32_t *dst, uint32_t *src) {
   }
   return true;
 }
-
 
 /* Some page table changes can cause the CPU's translation
    lookaside buffer (TLB) to become out-of-sync with the page

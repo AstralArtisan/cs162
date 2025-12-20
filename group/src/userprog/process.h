@@ -31,22 +31,22 @@ struct process {
 
 /* Stores the status of a child process. */
 struct child {
-   pid_t pid;
-   int exit_status;
-   bool exited;
-   bool waiting;
-   bool killed;
-   bool loaded;
-   struct semaphore wait_sema;
-   struct semaphore load_sema;
-   struct list_elem elem;
+  pid_t pid;
+  int exit_status;
+  bool exited;
+  bool waiting;
+  bool killed;
+  bool loaded;
+  struct semaphore wait_sema;
+  struct semaphore load_sema;
+  struct list_elem elem;
 };
 
 /* Tracks open files for a process. */
 struct pfile {
-   struct file* file;
-   int fd; // file descriptor
-   struct list_elem elem;
+  struct file* file;
+  int fd; // file descriptor
+  struct list_elem elem;
 };
 
 void userprog_init(void);

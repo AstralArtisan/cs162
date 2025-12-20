@@ -70,7 +70,7 @@ struct child* find_child(pid_t pid) {
   struct list_elem* e;
   for (e = list_begin(&t->child_list); e != list_end(&t->child_list); e = list_next(e)) {
     struct child* c = list_entry(e, struct child, elem);
-    if (c->pid == pid) 
+    if (c->pid == pid)
       return c;
   }
   return NULL;
@@ -92,7 +92,8 @@ pid_t process_execute(const char* file_name) {
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page(0);
-  if (fn_copy == NULL) return TID_ERROR;
+  if (fn_copy == NULL)
+    return TID_ERROR;
   strlcpy(fn_copy, file_name, PGSIZE);
   /* Save the program name. */
   char program_name[32];
@@ -114,11 +115,12 @@ pid_t process_execute(const char* file_name) {
   struct exec_helper* helper = malloc(sizeof(struct exec_helper));
   helper->file_name = fn_copy;
   helper->child_proc = child_proc;
-  
+
   /* Create a new thread to execute FILE_NAME. */
   tid = thread_create(program_name, PRI_DEFAULT, start_process, helper);
   sema_down(&child_proc->load_sema); // Wait for child to load
-  if (!child_proc->loaded) tid = TID_ERROR;
+  if (!child_proc->loaded)
+    tid = TID_ERROR;
   if (tid == TID_ERROR) {
     list_remove(&child_proc->elem);
     free(child_proc);
@@ -252,7 +254,7 @@ void process_exit(void) {
       e = next;
     }
   }
-  
+
   if (cur->child_process) {
     cur->child_process->exited = true;
     sema_up(&cur->child_process->wait_sema);
@@ -293,7 +295,7 @@ void process_exit(void) {
     pagedir_activate(NULL);
     pagedir_destroy(pd);
   }
-  
+
   /* Free the PCB of this process and kill this thread
      Avoid race where PCB is freed before t->pcb is set to NULL
      If this happens, then an unfortuantely timed timer interrupt
@@ -324,7 +326,8 @@ void process_activate(void) {
 int process_open_file(struct file* f) {
   struct thread* t = thread_current();
   struct pfile* pf = malloc(sizeof(struct pfile));
-  if (pf == NULL) return -1;
+  if (pf == NULL)
+    return -1;
   pf->file = f;
   pf->fd = t->next_fd++;
   list_push_back(&t->open_files, &pf->elem);
@@ -657,26 +660,25 @@ static bool setup_stack(void** esp, int argc, char** argv) {
       memcpy(kpage + (user_sp - user_page_bottom), argv[i], len);
       arg_ptrs[i] = (char*)user_sp;
     }
-    
-      /* Do word align. */
-	    /* Compute size of metadata we will push after argument strings. */
-	    size_t meta_size =
-	        sizeof(char*)              /* NULL sentinel for argv[argc] */
-	      + argc * sizeof(char*)       /* argv[i] pointers */
-	      + sizeof(char**)             /* argv */
-	      + sizeof(int)                /* argc */
-	      + sizeof(void*);             /* fake return address */
-	
-	    /* Extra words consumed on entry to user code. */
-	    const size_t kStartOverhead = 2 * sizeof(void*) + sizeof(void*); /* 12 bytes */
 
-	    /* Address ESP would have after pushing meta_size + overhead. */
-	    uintptr_t want = (uintptr_t)user_sp - meta_size - kStartOverhead;
-	    size_t pad = want & 0xF;
-	
-	    /* Pad so final ESP is 16-byte aligned. */
-	    user_sp -= pad;
-	    memset(kpage + (user_sp - user_page_bottom), 0, pad);
+    /* Do word align. */
+    /* Compute size of metadata we will push after argument strings. */
+    size_t meta_size = sizeof(char*)          /* NULL sentinel for argv[argc] */
+                       + argc * sizeof(char*) /* argv[i] pointers */
+                       + sizeof(char**)       /* argv */
+                       + sizeof(int)          /* argc */
+                       + sizeof(void*);       /* fake return address */
+
+    /* Extra words consumed on entry to user code. */
+    const size_t kStartOverhead = 2 * sizeof(void*) + sizeof(void*); /* 12 bytes */
+
+    /* Address ESP would have after pushing meta_size + overhead. */
+    uintptr_t want = (uintptr_t)user_sp - meta_size - kStartOverhead;
+    size_t pad = want & 0xF;
+
+    /* Pad so final ESP is 16-byte aligned. */
+    user_sp -= pad;
+    memset(kpage + (user_sp - user_page_bottom), 0, pad);
 
     /* Push a null sentinel for argv[argc]. */
     user_sp -= sizeof(char*);

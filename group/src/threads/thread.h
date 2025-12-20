@@ -92,10 +92,11 @@ struct thread {
 
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
-  struct list child_list; /* List of child processes */
-  struct child* child_process; /* Pointer to child process struct */
-  int next_fd; /* Next file descriptor to be assigned */
-  struct list open_files; /* List of open files */
+
+  struct list child_list;       /* List of child processes */
+  struct child* child_process;  /* Pointer to child process struct */
+  int next_fd;                  /* Next file descriptor to be assigned */
+  struct list open_files;       /* List of open files */
   struct file* executable_file; /* File the thread is executing */
 
 #ifdef USERPROG

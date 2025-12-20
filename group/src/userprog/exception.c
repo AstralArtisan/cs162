@@ -5,7 +5,7 @@
 #include "userprog/process.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
-#include "userprog/syscall.h"  // optional
+#include "userprog/syscall.h"
 void Exit(int status);
 
 /* Number of page faults processed. */
@@ -149,7 +149,7 @@ static void page_fault(struct intr_frame* f) {
   if (user) {
     Exit(-1);
   } else {
-    f->eip = (void *) f->eax;
+    f->eip = (void*)f->eax;
     f->eax = 0xffffffff;
     return;
   }

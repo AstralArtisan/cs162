@@ -34,9 +34,9 @@ void seek(int fd, unsigned position);
 int tell(int fd);
 void close(int fd);
 
-void syscall_init(void) { 
+void syscall_init(void) {
   lock_init(&filesys_lock);
-  intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); 
+  intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
@@ -51,7 +51,7 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
    * include it in your final submission.
    */
 
-  //printf("System call number: %d\n", args[0]); 
+  //printf("System call number: %d\n", args[0]);
 
   if (args[0] == SYS_EXIT) {
     get_args(f, args, 1);
@@ -85,20 +85,20 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
   else if (args[0] == SYS_CREATE) {
     get_args(f, args, 2);
-    check_user_string((const char*) args[1]);
-    f->eax = create((const char*) args[1], (unsigned) args[2]);
+    check_user_string((const char*)args[1]);
+    f->eax = create((const char*)args[1], (unsigned)args[2]);
   }
 
   else if (args[0] == SYS_REMOVE) {
     get_args(f, args, 1);
-    check_user_string((const char*) args[1]);
-    f->eax = remove((const char*) args[1]);
+    check_user_string((const char*)args[1]);
+    f->eax = remove((const char*)args[1]);
   }
 
   else if (args[0] == SYS_OPEN) {
     get_args(f, args, 1);
-    check_user_string((const char*) args[1]);
-    f->eax = open((const char*) args[1]);
+    check_user_string((const char*)args[1]);
+    f->eax = open((const char*)args[1]);
   }
 
   else if (args[0] == SYS_FILESIZE) {
@@ -108,19 +108,19 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
 
   else if (args[0] == SYS_READ) {
     get_args(f, args, 3);
-    check_user_buffer((const void*) args[2], (unsigned) args[3], true);
-    f->eax = read(args[1], (void*) args[2], (unsigned) args[3]);
+    check_user_buffer((const void*)args[2], (unsigned)args[3], true);
+    f->eax = read(args[1], (void*)args[2], (unsigned)args[3]);
   }
 
   else if (args[0] == SYS_WRITE) {
     get_args(f, args, 3);
-    check_user_buffer((const void*) args[2], (unsigned) args[3], false);
-    f->eax = write(args[1], (const void*) args[2], (unsigned) args[3]);
+    check_user_buffer((const void*)args[2], (unsigned)args[3], false);
+    f->eax = write(args[1], (const void*)args[2], (unsigned)args[3]);
   }
 
   else if (args[0] == SYS_SEEK) {
     get_args(f, args, 2);
-    seek(args[1], (unsigned) args[2]);
+    seek(args[1], (unsigned)args[2]);
   }
 
   else if (args[0] == SYS_TELL) {
@@ -177,15 +177,16 @@ static void fork_process(void* addr) {
     child->pcb->main_thread = child;
     strlcpy(child->pcb->process_name, child->name, sizeof child->name);
   }
-  
+
   /* Copy parent's address space */
   if (success) {
-      /* Allocate and activate page directory. */
+    /* Allocate and activate page directory. */
     child->pcb->pagedir = pagedir_create();
     if (child->pcb->pagedir == NULL)
       goto done;
     cp_success = pagedir_copy(child->pcb->pagedir, parent->pcb->pagedir);
-    if (!cp_success) goto done;
+    if (!cp_success)
+      goto done;
     process_activate();
   }
 
@@ -193,7 +194,8 @@ static void fork_process(void* addr) {
   if (success) {
     lock_acquire(&filesys_lock);
     struct list_elem* e;
-    for (e = list_begin(&parent->open_files); e != list_end(&parent->open_files); e = list_next(e)) {
+    for (e = list_begin(&parent->open_files); e != list_end(&parent->open_files);
+         e = list_next(e)) {
       struct pfile* parent_pf = list_entry(e, struct pfile, elem);
       struct file* file = parent_pf->file;
       struct pfile* child_pf = malloc(sizeof(struct pfile));
@@ -238,7 +240,8 @@ done:
 pid_t fork(struct intr_frame* f) {
   struct thread* cur = thread_current();
   struct child* child_proc = child_init();
-  if (child_proc == NULL)  return -1;
+  if (child_proc == NULL)
+    return -1;
   struct fork_helper* helper = malloc(sizeof(struct fork_helper));
   helper->parent = cur;
   helper->child_proc = child_proc;
@@ -300,7 +303,7 @@ int filesize(int fd) {
 
 int read(int fd, void* buffer, unsigned size) {
   if (fd == STDIN_FILENO) {
-    uint8_t* buf = (uint8_t*) buffer;
+    uint8_t* buf = (uint8_t*)buffer;
     for (unsigned i = 0; i < size; i++) {
       buf[i] = input_getc();
     }
@@ -320,7 +323,7 @@ int read(int fd, void* buffer, unsigned size) {
 int write(int fd, const void* buffer, unsigned size) {
   if (fd == STDOUT_FILENO) {
     #define STDOUT_CHUNK 256
-    const char* buf = (const char*) buffer;
+    const char* buf = (const char*)buffer;
     unsigned remaining = size;
     while (remaining > 0) {
       unsigned chunk = remaining > STDOUT_CHUNK ? STDOUT_CHUNK : remaining;
@@ -375,31 +378,32 @@ void close(int fd) {
 /* Reads a byte at user virtual address UADDR.
    UADDR must be below PHYS_BASE.
    Returns the byte value if successful, -1 if a segfault occurred. */
-static int get_user(const uint8_t *uaddr) {
+static int get_user(const uint8_t* uaddr) {
   int result;
-  asm ("movl $1f, %0; movzbl %1, %0; 1:"
-  : "=&a" (result) : "m" (*uaddr));
+  asm("movl $1f, %0; movzbl %1, %0; 1:" : "=&a"(result) : "m"(*uaddr));
   return result;
 }
 
 /* Writes BYTE to user address UDST.
    UDST must be below PHYS_BASE.
    Returns true if successful, false if a segfault occurred. */
-static bool put_user(uint8_t *udst, uint8_t byte) {
+static bool put_user(uint8_t* udst, uint8_t byte) {
   int error_code;
-  asm ("movl $1f, %0; movb %b2, %1; 1:"
-  : "=&a" (error_code), "=m" (*udst) : "q" (byte));
+  asm("movl $1f, %0; movb %b2, %1; 1:" : "=&a"(error_code), "=m"(*udst) : "q"(byte));
   return error_code != -1;
 }
 
 /* Checks if a user virtual address is valid. If not, terminates the
    process. If WRITE is true, checks if the user address is writable. */
 void check_user_vaddr(const void* vaddr, bool write) {
-  if (!is_user_vaddr(vaddr)) Exit(-1);
+  if (!is_user_vaddr(vaddr))
+    Exit(-1);
   if (write) {
-    if (!put_user((uint8_t*)vaddr, 0)) Exit(-1);
+    if (!put_user((uint8_t*)vaddr, 0))
+      Exit(-1);
   } else {
-    if (get_user((const uint8_t*)vaddr) == -1) Exit(-1);
+    if (get_user((const uint8_t*)vaddr) == -1)
+      Exit(-1);
   }
 }
 
@@ -409,8 +413,10 @@ void check_user_string(const char* str) {
   check_user_vaddr((void*)ptr, false);
   while (ptr++) {
     int get = get_user(ptr);
-    if (get == -1) Exit(-1);  // invalid
-    if (get == 0) break;  // '/0'
+    if (get == -1)
+      Exit(-1); // invalid
+    if (get == 0)
+      break; // '/0'
   }
 }
 

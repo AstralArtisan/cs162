@@ -1095,3 +1095,601 @@ bool pagedir_copy(uint32_t *dst, uint32_t *src) {
 Now, we've finished all the process control system calls. What a great thing I've done! It's really a hard thing to understand what I need to do, and how Pintos really works. Until finish this part, it has already taken me two months to do it. Hope I can do better in the next parts.
 
 ## File Operation Syscalls
+
+In this part, we focus on some file operation syscalls, including `create`, `remove`, `open`, `filesize`, `read`, `write`, `seek`, `tell` and `close`.
+
+### Synchronization
+
+Pintos’ file system is not thread-safe, so we must make sure that our file operation syscalls do not call multiple file system functions concurrently. Thus in this project, we use a simple **global lock** `filesys_lock` on all file system operations and syscalls.
+
+While a user process is running, nobody can modify its executable on disk, which means we should add some protective measures on our origin `load`. Therefore, we declare `filesys_lock` as `extern` in `syscall.h` so that both `syscall.c` and `process.c` can use the same lock instance consistently.
+
+For each file-related syscall, the kernel **acquires** `filesys_lock` before calling into the file system layer and **releases** it before returning to user mode. For `load`, we also need additional logic (discussed later) to deny writes to the currently running executable.
+
+### Details of syscalls
+
+In this section, I describe how each file operation system call is implemented in Pintos kernel. For clarity, I implement a small kernel helper function for each syscall.
+
+#### `CREATE`
+
+This is its signature in user program:
+
+```c
+bool create (const char *file, unsigned initial_size);
+```
+
+The syscall creates a new file called `file` initially `initial_size` bytes in size. It returns true if successful, false otherwise. Because `file` is a user pointer to a string, we must validate it using `check_user_string`, similar to what we do in `exec`. There are 2 args, the first one is the `file` name, the second one is the file's `initial_sieze`. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_CREATE) {
+    get_args(f, args, 2);
+    check_user_string((const char*) args[1]);
+    f->eax = create((const char*) args[1], (unsigned) args[2]);
+}
+```
+
+In `filesys.c`, we already have a raw function `filesys_create` for creating a file. So we only need to invoke this function in our syscall function, and judge whether the `create` operation is successful.
+
+```c
+bool create(const char* file, unsigned initial_size) {
+    lock_acquire(&filesys_lock);
+    bool result;
+    result = filesys_create(file, initial_size);
+    lock_release(&filesys_lock);
+    return result;
+}
+```
+
+------
+
+#### `REMOVE`
+
+This is its signature in user program:
+
+```c
+bool remove (const char *file);
+```
+
+The syscall deletes the file named `file`. It returns true if successful, false otherwise. A file may be removed regardless of whether it is open or closed, and removing an open file does not close it. As before, `file` is a user string pointer, so we validate it with `check_user_string` before performing the operation. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_REMOVE) {
+    get_args(f, args, 1);
+    check_user_string((const char*) args[1]);
+    f->eax = remove((const char*) args[1]);
+}
+```
+
+Also, we already have `filesys_remove`, so we just invoke it.
+
+```c
+bool remove(const char* file) {
+    lock_acquire(&filesys_lock);
+    bool result;
+    result = filesys_remove(file);
+    lock_release(&filesys_lock);
+    return result;
+}
+```
+
+------
+
+#### `OPEN`
+
+This is its signature in user program:
+
+```c
+int open (const char *file);
+```
+
+The syscall opens the file named `file`. It returns a nonnegative integer handle called a “file descriptor” (`fd`), or `-1` if the file could not be opened. When a single file is opened more than once, whether by a single process or different processes, each open returns a new file descriptor. Different file descriptors for a single file are closed independently in separate calls to `close` and they do **not** share a file position. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_OPEN) {
+    get_args(f, args, 1);
+    check_user_string((const char*)args[1]);
+    f->eax = open((const char*)args[1]);
+}
+```
+
+A file descriptor is a process-level abstraction: each process maintains its own independent set of file descriptors, and each descriptor represents one open file within that process. In Pintos, file descriptors `0` and `1` are reserved for the console: `0` (`STDIN_FILENO`) corresponds to standard input, and `1` (`STDOUT_FILENO`) corresponds to standard output. Therefore, our file descriptor allocation should start from `2`. Later, when implementing `read` and `write`, we also need to handle these two special `fd`s as dedicated cases.
+
+To support per-process file descriptors, we extend `struct thread`. In this project, a process is essentially a thread with an associated `pcb`, so process-specific state is naturally stored in this core structure. We add:
+
+```c
+int next_fd; /* Next file descriptor to be assigned */
+struct list open_files; /* List of open files */
+```
+
+Here, `next_fd` is initialized to `2` and increments by one each time the process opens a new file. Meanwhile, `open_files` is used to track the set of files currently opened by the process. But what exactly is stored in this list? We need a structure that binds together an `fd` number and its corresponding `file` object, which leads to the following helper structure in `process.h`:
+
+```c
+/* Tracks open files for a process. */
+struct pfile {
+   struct file* file;
+   int fd; // file descriptor
+   struct list_elem elem;
+};
+```
+
+With this design, the `open_files` list stores `struct pfile` entries.
+
+With the data structures in place, the syscall implementation is straightforward:
+
+```c
+int open(const char* file) {
+    lock_acquire(&filesys_lock);
+    int fd = -1;
+    struct file* f = filesys_open(file);
+    if (!f) {
+        lock_release(&filesys_lock);
+        return fd;
+    }
+    fd = process_open_file(f);
+    lock_release(&filesys_lock);
+    return fd;
+}
+```
+
+We still use the existing `filesys_open`, which returns the `struct file*` for the target file. If the file does not exist (or cannot be opened), we return `-1` to indicate failure. Otherwise, we allocate a new `fd` for this open instance by calling `process_open_file`. Since file descriptors are maintained per process, this helper is placed in `process.c`. Its job is simply to create a `struct pfile` entry for the opened `file`, assign it a fresh `fd`, increase the `next_fd` of the process, and push it into the current process’s `open_files` list:
+
+```c
+/* Allocates a file descriptor to an open file.*/
+int process_open_file(struct file* f) {
+    struct thread* t = thread_current();
+    struct pfile* pf = malloc(sizeof(struct pfile));
+    if (pf == NULL) return -1;
+    pf->file = f;
+    pf->fd = t->next_fd++;
+    list_push_back(&t->open_files, &pf->elem);
+    return pf->fd;
+}
+```
+
+------
+
+#### `FILESIZE`
+
+This is its signature in user program:
+
+```c
+int filesize (int fd);
+```
+
+The syscall returns the size, in bytes, of the open file with file descriptor `fd`. It returns `-1` if `fd` does not correspond to an entry in the file descriptor table. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_FILESIZE) {
+    get_args(f, args, 1);
+    f->eax = filesize(args[1]);
+}
+```
+
+To implement this syscall, the key is to translate an `fd` into the underlying `struct file*`. This is exactly why we maintain the `(fd, file)` mapping using `struct pfile` entries stored in the per-process `open_files` list. With this design, we can simply traverse the list, locate the `pfile` whose `fd` matches the target, and return its associated file pointer. This is done by `process_get_file`:
+
+```c
+/* Retrieves the file associated with a given file descriptor.*/
+struct file* process_get_file(int fd) {
+    struct thread* t = thread_current();
+    struct list_elem* e;
+    for (e = list_begin(&t->open_files); e != list_end(&t->open_files); e = list_next(e)) {
+        struct pfile* pf = list_entry(e, struct pfile, elem);
+        if (pf->fd == fd) {
+            return pf->file;
+        }
+    }
+    return NULL;
+}
+```
+
+Once we have the file pointer, `filesize` becomes a thin wrapper around Pintos’s `file_length`. If `process_get_file` returns `NULL`, we keep the default result `-1`:
+
+```c
+int filesize(int fd) {
+    lock_acquire(&filesys_lock);
+    int size = -1;
+    struct file* f = process_get_file(fd);
+    if (f != NULL) {
+        size = file_length(f);
+    }
+    lock_release(&filesys_lock);
+    return size;
+}
+```
+
+------
+
+#### `READ`
+
+This is its signature in user program:
+
+```c
+int read (int fd, void *buffer, unsigned size);
+```
+
+The syscall reads `size` bytes from the file open as `fd` into `buffer`. Returns the number of bytes actually read (0 at end of file), or `-1` if the file could not be read (due to a condition other than end of file, such as `fd` not corresponding to an entry in the file descriptor table). 
+
+At this point, we face a new safety issue: `buffer` is a user pointer, so the user may pass a null pointer, an unmapped pointer, or a pointer that crosses into invalid memory. To handle this, I reuse the idea of `check_user_vaddr` and validate the entire memory range `[buffer, buffer + size)` byte by byte. This leads to a simple helper:
+
+```c
+/* Checks if a user buffer for read and write is valid. */
+void check_user_buffer(const void* buffer, unsigned size, bool write) {
+    void* ptr = (void*)buffer;
+    for (unsigned i = 0; i < size; i++) {
+        check_user_vaddr(ptr + i, write);
+    }
+}
+```
+
+With this security guarantee, we can continue. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_READ) {
+    get_args(f, args, 3);
+    check_user_buffer((const void*)args[2], (unsigned)args[3], true);
+    f->eax = read(args[1], (void*)args[2], (unsigned)args[3]);
+}
+```
+
+As mentioned earlier, there are two special file descriptors: `STDIN_FILENO` (0) and `STDOUT_FILENO` (1). For `read`, when `fd == STDIN_FILENO`, we should read from the keyboard. Pintos provides `input_getc` function in `devices/input.c`, so in this case we fetch characters from the device driver and store them into the user buffer one by one.
+
+For the normal case (`fd` refers to an actual file), we still use `process_get_file(fd)` to locate the corresponding `struct file*` in the current process, and then call Pintos’s `file_read`.
+
+```c
+int read(int fd, void* buffer, unsigned size) {
+    if (fd == STDIN_FILENO) {
+        uint8_t* buf = (uint8_t*)buffer;
+        for (unsigned i = 0; i < size; i++) {
+            buf[i] = input_getc();
+        }
+        return size;
+    }
+    lock_acquire(&filesys_lock);
+    struct file* f = process_get_file(fd);
+    if (f == NULL) {
+        lock_release(&filesys_lock);
+        return -1;
+    }
+    int bytes_read = file_read(f, buffer, size);
+    lock_release(&filesys_lock);
+    return bytes_read;
+}
+```
+
+------
+
+#### `WRITE`
+
+This is its signature in user program:
+
+```c
+int write (int fd, const void *buffer, unsigned size);
+```
+
+The syscall writes `size` bytes from `buffer` to the open file with file descriptor `fd`. It returns the number of bytes actually written, which may be less than `size` if some bytes could not be written. Returns `-1` if `fd` does not correspond to an entry in the file descriptor table. As `read`, we also need `check_user_buffer` for safety. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_WRITE) {
+    get_args(f, args, 3);
+    check_user_buffer((const void*)args[2], (unsigned)args[3], false);
+    f->eax = write(args[1], (const void*)args[2], (unsigned)args[3]);
+}
+```
+
+For `fd == STDOUT_FILENO`, Pintos requires that small outputs should be written in one `putbuf` call to reduce interleaving between processes. For large buffers, it is acceptable to split them into chunks. In our implementation, we write to the console in fixed-size chunks (`STDOUT_CHUNK`), then return `size` as the number of bytes written.
+
+For normal files, we retrieve the underlying `struct file*` using `process_get_file(fd)` and call `file_write`.
+
+```c
+int write(int fd, const void* buffer, unsigned size) {
+    if (fd == STDOUT_FILENO) {
+        #define STDOUT_CHUNK 256
+        const char* buf = (const char*)buffer;
+        unsigned remaining = size;
+        while (remaining > 0) {
+            unsigned chunk = remaining > STDOUT_CHUNK ? STDOUT_CHUNK : remaining;
+            putbuf(buf, chunk);
+            buf += chunk;
+            remaining -= chunk;
+        }
+        return size;
+    }
+    lock_acquire(&filesys_lock);
+    struct file* f = process_get_file(fd);
+    if (f == NULL) {
+        lock_release(&filesys_lock);
+        return -1;
+    }
+    int bytes_written = file_write(f, buffer, size);
+    lock_release(&filesys_lock);
+    return bytes_written;
+}
+```
+
+------
+
+#### `SEEK`
+
+This is its signature in user program:
+
+```c
+void seek (int fd, unsigned position);
+```
+
+The syscall changes the next byte to be read or written in open file `fd` to `position`, expressed in bytes from the beginning of the file. Thus, a position of 0 is the file’s start. If `fd` does not correspond to an entry in the file descriptor table, this function should do nothing. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_SEEK) {
+    get_args(f, args, 2);
+    seek(args[1], (unsigned)args[2]);
+}
+```
+
+The kernel helper locks the file system, looks up the file, and calls `file_seek` if the descriptor is valid:
+
+```c
+void seek(int fd, unsigned position) {
+    lock_acquire(&filesys_lock);
+    struct file* f = process_get_file(fd);
+    if (f != NULL) {
+        file_seek(f, position);
+    }
+    lock_release(&filesys_lock);
+}
+```
+
+------
+
+#### `TELL`
+
+This is its signature in user program:
+
+```c
+int tell(int fd);
+```
+
+The syscall returns the position of the next byte to be read or written in open file `fd`, expressed in bytes from the beginning of the file. If the operation is unsuccessful, it can either `exit` with `-1` or it can just fail silently. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_TELL) {
+    get_args(f, args, 1);
+    f->eax = tell(args[1]);
+}
+```
+
+Implementation: protect with lock, fetch the file, and call `file_tell`:
+
+```c
+int tell(int fd) {
+    lock_acquire(&filesys_lock);
+    int position = -1;
+    struct file* f = process_get_file(fd);
+    if (f != NULL) {
+        position = file_tell(f);
+    }
+    lock_release(&filesys_lock);
+    return position;
+}
+```
+
+------
+
+#### `CLOSE`
+
+This is its signature in user program:
+
+```c
+void close (int fd);
+```
+
+The syscall closes file descriptor `fd`. If the operation is unsuccessful, it can either `exit` with `-1` or it can just fail silently. In `syscall_handler`, it's implemented like below:
+
+```c
+if (args[0] == SYS_CLOSE) {
+    get_args(f, args, 1);
+    close(args[1]);
+}
+```
+
+When a process tries to close a file, we first locate the open file corresponding to the given `fd`, call `file_close` on it, and then remove the associated entry from the `open_files` list.
+
+```c
+/* Closes the file associated with a given file descriptor.*/
+void process_close_file(int fd) {
+  struct thread* t = thread_current();
+  struct list_elem* e;
+  for (e = list_begin(&t->open_files); e != list_end(&t->open_files); e = list_next(e)) {
+    struct pfile* pf = list_entry(e, struct pfile, elem);
+    if (pf->fd == fd) {
+      file_close(pf->file);
+      list_remove(&pf->elem);
+      free(pf);
+      return;
+    }
+  }
+}
+```
+
+This is implemented by `process_close_file`. Therefore, in the `close` syscall, once we confirm that the `fd` is valid and obtain the corresponding `struct file*`, we simply call `process_close_file(fd)` to perform the actual close and cleanup.
+
+```c
+void close(int fd) {
+    lock_acquire(&filesys_lock);
+    struct file* f = process_get_file(fd);
+    if (f != NULL) {
+        process_close_file(fd);
+    }
+    lock_release(&filesys_lock);
+}
+```
+
+### Additional work for file operations
+
+Until now, we have already finish all the system call functions we need in this project, but as the file system be introduced to every process, there is some other work we need to do.
+
+#### Close all the files when process exits
+
+When a process exits, it's essential to close all the files it opened. Thus, we need to add something to our `process_exit` function to close the files:
+
+```c
+/* Close all open files. */
+if (!list_empty(&cur->open_files)) {
+    lock_acquire(&filesys_lock);
+    struct list_elem* e;
+    for (e = list_begin(&cur->open_files); e != list_end(&cur->open_files);) {
+        struct pfile* pf = list_entry(e, struct pfile, elem);
+        struct list_elem* next = list_next(e);
+        file_close(pf->file);
+        list_remove(&pf->elem);
+        free(pf);
+        e = next;
+    }
+    lock_release(&filesys_lock);
+}
+```
+
+Remember that `filesys_lock` is designed as a global lock. For all file operations, we need the lock in this project, including this one in `process.c`. Here, after acquire the lock, just like what we do for `child_list`, we traverse the list and close the files one by one.
+
+#### Denying writes to running executables
+
+As mentioned earlier, while a user program is running, the executable file it was loaded from must not be modified on disk. Therefore, we need an additional protection mechanism for the running executable. This logic is mainly implemented in `load`.
+
+First, I add a new member `executable_file` to `struct thread` to record the executable file currently used by the process. In `load`, before opening and reading the executable, I use the global file system lock `filesys_lock` to protect the entire loading procedure. After the file is opened successfully, I call `file_deny_write` to prevent any writes to that executable while it is running, and store the file pointer in `t->executable_file`.
+
+Concretely, I modify `load` as follows:
+
+```c
+    /* Open executable file. */
+    lock_acquire(&filesys_lock);
+    file = filesys_open(file_name);
+    if (file == NULL) {
+        printf("load: %s: open failed\n", file_name);
+        goto done;
+    }
+    file_deny_write(file);
+    t->executable_file = file;
+    ......
+done:
+    /* We arrive here whether the load is successful or not. */
+    lock_release(&filesys_lock);
+    return success;
+```
+
+When the process exits (in `process_exit`), we must restore the file to a normal state. So I allow writes again and then close the executable file:
+
+```c
+if (cur->executable_file != NULL) {
+    file_allow_write(cur->executable_file);
+    file_close(cur->executable_file);
+}
+```
+
+With this protection, the executable cannot be corrupted while the program is running, and once the process terminates, the write permission is restored so the file can be modified or executed again in later runs.
+
+#### `fork` with open files
+
+Aha, it’s `fork` again! This syscall really gave me a headache.
+
+`fork` creates a child process by copying the parent process. That means all file descriptors already opened by the parent should also appear in the child after `fork`. However, we **cannot** implement this by simply calling `open` again in the child: `open` creates a brand-new `struct file*` object for the same `inode`, while `fork` requires the parent and child to behave as if they are referring to the **same open file** (in particular, they should share the same file position).
+
+Therefore, instead of reopening files, the child needs to inherit the parent’s `pfile` entries so that both processes’ file descriptors point to the same underlying `struct file *`.
+
+This immediately leads to another problem: after `fork`, the parent and child run independently, so closing a file in one process must not break the other process. But in Pintos, `file_close` frees the `struct file` object and closes its `inode` immediately when there are no other opens of the file. If the parent and child share the same `struct file*` and both call `close`, then the first `close` would free the file structure, and the second process would later access freed memory, causing serious errors.
+
+To solve this, we introduce a small optimization in `file.c`: we add a reference counter `ref` to `struct file` to track how many processes are currently sharing the same open file object.
+
+- When a file is opened, `ref` is initialized to `1`, meaning only one process currently holds it.
+- When `fork` duplicates the parent’s file descriptor entries, we increment `ref` for each shared `struct file*`.
+
+Because Pintos emphasizes encapsulation and safety in the file system layer, I do not modify `ref` directly from outside. Instead, I provide a small API `file_ref_increase()` that updates `ref` safely, and call this API during `fork`.
+
+The relevant code in `file.c` is:
+
+```c
+/* An open file. */
+struct file {
+    struct inode* inode; /* File's inode. */
+    off_t pos;           /* Current position. */
+    bool deny_write;     /* Has file_deny_write() been called? */
+    int ref;             /* Reference count. */
+};
+
+/* Opens a file for the given INODE, of which it takes ownership,
+   and returns the new file.  Returns a null pointer if an
+   allocation fails or if INODE is null. */
+struct file* file_open(struct inode* inode) {
+    struct file* file = calloc(1, sizeof *file);
+    if (inode != NULL && file != NULL) {
+        file->inode = inode;
+        file->pos = 0;
+        file->deny_write = false;
+        file->ref = 1;
+        return file;
+    } else {
+        inode_close(inode);
+        free(file);
+        return NULL;
+    }
+}
+void file_ref_increase(struct file* file) {
+    ASSERT(file != NULL);
+    file->ref++;
+}
+```
+
+In `fork`, I copy the parent’s open file list into the child and increment the reference count for every shared file:
+
+```c
+/* Copy parent's file descriptors. */
+if (success) {
+    lock_acquire(&filesys_lock);
+    struct list_elem* e;
+    for (e = list_begin(&parent->open_files); e != list_end(&parent->open_files);
+         e = list_next(e)) {
+        struct pfile* parent_pf = list_entry(e, struct pfile, elem);
+        struct file* file = parent_pf->file;
+        struct pfile* child_pf = malloc(sizeof(struct pfile));
+        if (child_pf == NULL || file == NULL) {
+            success = false;
+            lock_release(&filesys_lock);
+            goto done;
+        }
+        file_ref_increase(file);
+        child_pf->file = file;
+        child_pf->fd = child->next_fd++;
+        list_push_back(&child->open_files, &child_pf->elem);
+    }
+    lock_release(&filesys_lock);
+}
+```
+
+Finally, we update the close logic. With reference counting, closing a file should only release the underlying `inode` and free the `struct file` when **no process is using it anymore**. If multiple processes still reference the file (`ref > 1`), we simply decrement the counter and return, leaving the file object valid for the remaining process:
+
+```c
+/* Closes FILE. */
+void file_close(struct file* file) {
+    if (file != NULL) {
+        if (file->ref > 1) {
+            file->ref--;
+            return;
+        }
+        file_allow_write(file);
+        inode_close(file->inode);
+        free(file);
+    }
+}
+```
+
+With these changes, `fork` can correctly inherit open files from the parent (without reopening them), and `close` will not accidentally break the other process that still uses the same open file object.
+
+## Summary by ChatGPT
+
+This project extends Pintos with a complete user program support stack, focusing on correctness, safety, and well-defined process semantics.
+
+- **Argument Passing**: Implemented a fully compliant initial user stack layout for `_start(argc, argv)`, including correct string placement, pointer construction, and **16-byte alignment**.
+- **System Call Safety**: Built a robust syscall framework with **byte-by-byte argument fetching**, strict user pointer/string validation, and a fault-tolerant strategy that prevents malformed user pointers from crashing the kernel.
+- **Process Lifecycle & Synchronization**: Introduced `struct child` to model parent–child relationships and used **two semaphores (`wait_sema`, `load_sema`)** to synchronize `exec/wait/exit/fork`, ensuring deterministic return behavior and correct status propagation.
+- **Fork Support**: Implemented `fork` by copying the parent address space and execution context, guaranteeing the child observes `fork()` returning `0`.
+- **File System Semantics**: Enforced executable write protection via `file_deny_write()` during execution, and implemented shared open-file inheritance across `fork` using **reference counting** to avoid double-close and preserve shared file position semantics.
+
+Overall, the design prioritizes defensive memory handling, race-free parent/child coordination, and faithful Unix-like behavior for process and file operations.

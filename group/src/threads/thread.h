@@ -99,6 +99,8 @@ struct thread {
   struct list open_files;       /* List of open files */
   struct file* executable_file; /* File the thread is executing */
 
+  int64_t wakeup_tick;          /* Tick to wake up the blocked thread */
+
 #ifdef USERPROG
   /* Owned by process.c. */
   struct process* pcb; /* Process control block if this thread is a userprog */

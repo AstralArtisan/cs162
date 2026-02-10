@@ -37,11 +37,11 @@ tid_t sys_pthread_create(stub_fun sfun, pthread_fun tfun, const void* arg);
 void sys_pthread_exit(void);
 tid_t sys_pthread_join(tid_t tid);
 bool sys_lock_init(lock_t* lock);
-void sys_lock_acquire(lock_t* lock);
-void sys_lock_release(lock_t* lock);
+bool sys_lock_acquire(lock_t* lock);
+bool sys_lock_release(lock_t* lock);
 bool sys_sema_init(sema_t* sema, int val);
-void sys_sema_down(sema_t* sema);
-void sys_sema_up(sema_t* sema);
+bool sys_sema_down(sema_t* sema);
+bool sys_sema_up(sema_t* sema);
 tid_t get_tid(void);
 
 
@@ -50,7 +50,7 @@ void syscall_init(void) {
   intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
-static void syscall_handler(struct intr_frame* f UNUSED) {
+static void syscall_handler(struct intr_frame* f) {
   check_user_vaddr(f->esp, false);
   uint32_t args[4];
   args[0] = get_syscall_number(f);
@@ -180,15 +180,13 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   else if (args[0] == SYS_LOCK_ACQUIRE) {
     get_args(f, args, 1);
     check_user_vaddr((void*)args[1], true);
-    sys_lock_acquire((lock_t*)args[1]);
-    f->eax = true;
+    f->eax = sys_lock_acquire((lock_t*)args[1]);
   }
 
   else if (args[0] == SYS_LOCK_RELEASE) {
     get_args(f, args, 1);
     check_user_vaddr((void*)args[1], true);
-    sys_lock_release((lock_t*)args[1]);
-    f->eax = true;
+    f->eax = sys_lock_release((lock_t*)args[1]);
   }
 
   else if (args[0] == SYS_SEMA_INIT) {
@@ -205,15 +203,13 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
   else if (args[0] == SYS_SEMA_DOWN) {
     get_args(f, args, 1);
     check_user_vaddr((void*)args[1], true);
-    sys_sema_down((sema_t*)args[1]);
-    f->eax = true;
+    f->eax = sys_sema_down((sema_t*)args[1]);
   }
 
   else if (args[0] == SYS_SEMA_UP) {
     get_args(f, args, 1);
     check_user_vaddr((void*)args[1], true);
-    sys_sema_up((sema_t*)args[1]);
-    f->eax = true;
+    f->eax = sys_sema_up((sema_t*)args[1]);
   }
 
   else if (args[0] == SYS_GET_TID) {
@@ -546,24 +542,30 @@ bool sys_lock_init(lock_t* lock) {
   return true;
 }
 
-void sys_lock_acquire(lock_t* lock) {
+bool sys_lock_acquire(lock_t* lock) {
   lock_t id = (lock_t)get_user((const uint8_t*)lock);
-  if (id == (lock_t)-1) Exit(-1);
+  if (id == (lock_t)-1)
+    return false;
   struct lock* klock = find_lock(id);
-  if (klock == NULL) {
-    Exit(-1);
-  }
+  if (klock == NULL)
+    return false;
+  if (lock_held_by_current_thread(klock))
+    return false;
   lock_acquire(klock);
+  return true;
 }
 
-void sys_lock_release(lock_t* lock) {
-    lock_t id = (lock_t)get_user((const uint8_t*)lock);
-  if (id == (lock_t)-1) Exit(-1);
+bool sys_lock_release(lock_t* lock) {
+  lock_t id = (lock_t)get_user((const uint8_t*)lock);
+  if (id == (lock_t)-1)
+    return false;
   struct lock* klock = find_lock(id);
-  if (klock == NULL) {
-    Exit(-1);
-  }
+  if (klock == NULL)
+    return false;
+  if (!lock_held_by_current_thread(klock))
+    return false;
   lock_release(klock);
+  return true;
 }
 
 /* Finds the semaphore associated with the given semaphore identifier. */
@@ -628,28 +630,30 @@ bool sys_sema_init(sema_t* sema, int val) {
   return true;
 }
 
-void sys_sema_down(sema_t* sema) {
+bool sys_sema_down(sema_t* sema) {
   sema_t id = (sema_t)get_user((const uint8_t*)sema);
   if (id == (sema_t)-1) {
-    Exit(-1);
+    return false;
   }
   struct semaphore* ksema = find_sema(id);
   if (ksema == NULL) {
-    Exit(-1);
+    return false;
   }
   sema_down(ksema);
+  return true;
 }
 
-void sys_sema_up(sema_t* sema) {
+bool sys_sema_up(sema_t* sema) {
   sema_t id = (sema_t)get_user((const uint8_t*)sema);
   if (id == (sema_t)-1) {
-    Exit(-1);
+    return false;
   }
   struct semaphore* ksema = find_sema(id);
   if (ksema == NULL) {
-    Exit(-1);
+    return false;
   }
   sema_up(ksema);
+  return true;
 }
 
 /* Functions working on checking validation and byte operations. */

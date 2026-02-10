@@ -1098,6 +1098,7 @@ void pthread_exit_main(void) {
       pthread_join(t->tid);
     }
   }
+  p->child_process->exit_status = 0;
   process_exit();
   NOT_REACHED();
 }

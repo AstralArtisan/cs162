@@ -93,12 +93,6 @@ struct thread {
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
 
-  struct list child_list;       /* List of child processes */
-  struct child* child_process;  /* Pointer to child process struct */
-  int next_fd;                  /* Next file descriptor to be assigned */
-  struct list open_files;       /* List of open files */
-  struct file* executable_file; /* File the thread is executing */
-
   int64_t wakeup_tick;          /* Tick to wake up the blocked thread */
 
 #ifdef USERPROG
@@ -140,6 +134,7 @@ void thread_unblock(struct thread*);
 
 struct thread* thread_current(void);
 tid_t thread_tid(void);
+struct thread* get_thread(tid_t tid);
 const char* thread_name(void);
 
 void thread_exit(void) NO_RETURN;

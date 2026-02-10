@@ -282,6 +282,17 @@ struct thread* thread_current(void) {
 /* Returns the running thread's tid. */
 tid_t thread_tid(void) { return thread_current()->tid; }
 
+/* Finds a thread by its tid. */
+struct thread* get_thread(tid_t tid) {
+  struct list_elem* e;
+  for (e = list_begin(&all_list); e != list_end(&all_list); e = list_next(e)) {
+    struct thread* t = list_entry(e, struct thread, allelem);
+    if (t->tid == tid)
+      return t;
+  }
+  return NULL;
+}
+
 /* Deschedules the current thread and destroys it.  Never
    returns to the caller. */
 void thread_exit(void) {
@@ -429,11 +440,6 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->priority = priority;
   t->pcb = NULL;
   t->magic = THREAD_MAGIC;
-  list_init(&t->child_list);
-  t->child_process = NULL;
-  t->next_fd = 2; // Start assigning fds from 2 (0 and 1 are stdin and stdout)
-  list_init(&t->open_files);
-  t->executable_file = NULL;
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);
   intr_set_level(old_level);

@@ -80,9 +80,9 @@ static void kill(struct intr_frame* f) {
          expected.  Kill the user process.  */
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
-      if (t->child_process != NULL) {
-        t->child_process->exited = true;
-        t->child_process->killed = true;
+      if (t->pcb != NULL && t->pcb->child_process != NULL) {
+        t->pcb->child_process->exited = true;
+        t->pcb->child_process->killed = true;
       }
       intr_dump_frame(f);
       process_exit();
@@ -93,9 +93,9 @@ static void kill(struct intr_frame* f) {
          Kernel code shouldn't throw exceptions.  (Page faults
          may cause kernel exceptions--but they shouldn't arrive
          here.)  Panic the kernel to make the point.  */
-      if (t->child_process != NULL) {
-        t->child_process->exited = true;
-        t->child_process->killed = true;
+      if (t->pcb != NULL && t->pcb->child_process != NULL) {
+        t->pcb->child_process->exited = true;
+        t->pcb->child_process->killed = true;
       }
       intr_dump_frame(f);
       PANIC("Kernel bug - unexpected interrupt in kernel");

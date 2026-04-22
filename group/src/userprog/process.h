@@ -36,9 +36,12 @@ struct process {
   
   struct list child_list;       /* List of child processes */
   struct child* child_process;  /* Pointer to child process struct */
+  struct lock child_list_lock;           /* Lock to protect child process */
   int next_fd;                  /* Next file descriptor to be assigned */
   struct list open_files;       /* List of open files */
   struct file* executable_file; /* File the thread is executing */
+  bool exiting;                   /* Avoid more than one thread exits together */
+  struct lock exit_lock;
   
   struct list locks;          /* Locks held by the process */
   lock_t next_lock;         /* Next lock identifier */
@@ -47,9 +50,8 @@ struct process {
   sema_t next_sema;          /* Next semaphore identifier */
   struct lock sema_protect;
   
-  uint8_t thread_count;      /* Number of threads in the process */
   struct bitmap* thread_bitmap; /* Bitmap to track threads */
-  struct lock thread_lock;   /* Lock to protect thread count */
+  struct lock thread_lock;   /* Lock to protect thread stack */
   struct list pt_list;       /* List of join threads in the process */
   
   struct list_elem elem;
@@ -100,6 +102,7 @@ struct sema_map {
 };
 
 void userprog_init(void);
+void init_pcb(struct process* pcb, struct thread* t);
 
 struct child* child_init(void);
 struct child* find_child(pid_t);

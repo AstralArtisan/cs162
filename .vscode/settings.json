@@ -11,5 +11,6 @@
         "boundary.h": "c",
         "cstddef": "c"
     },
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/group/src/compile_commands.json",
     "C_Cpp.errorSquiggles": "disabled"
 }

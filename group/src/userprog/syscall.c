@@ -169,7 +169,6 @@ static void syscall_handler(struct intr_frame* f) {
   else if (args[0] == SYS_LOCK_INIT) {
     get_args(f, args, 1);
     if (args[1] == 0) {
-      /* User-level lock_init(NULL) should fail gracefully. */
       f->eax = false;
     } else {
       check_user_vaddr((void*)args[1], true);
@@ -192,7 +191,6 @@ static void syscall_handler(struct intr_frame* f) {
   else if (args[0] == SYS_SEMA_INIT) {
     get_args(f, args, 2);
     if (args[1] == 0) {
-      /* User-level sema_init(NULL, ...) should fail gracefully. */
       f->eax = false;
     } else {
       check_user_vaddr((void*)args[1], true);
@@ -234,7 +232,10 @@ void Exit(int status) {
   if (cp != NULL) {
     cp->exit_status = status;
   }
-  printf("%s: exit(%d)\n", cur->pcb->process_name, status);
+  if (is_main_thread(cur, cur->pcb)) {
+    pthread_exit_main();
+    NOT_REACHED();
+  }
   process_exit();
 }
 
@@ -259,15 +260,9 @@ static void fork_process(void* addr) {
 
   /* Initialize process control block */
   if (success) {
-    new_pcb->pagedir = NULL;
     child->pcb = new_pcb;
-    child->pcb->main_thread = child;
-    strlcpy(child->pcb->process_name, child->name, sizeof child->name);
-    list_init(&child->pcb->child_list);
+    init_pcb(child->pcb, child);
     child->pcb->child_process = child_proc;
-    child->pcb->next_fd = 2; // Start assigning fds from 2 (0 and 1 are stdin and stdout)
-    list_init(&child->pcb->open_files);
-    child->pcb->executable_file = NULL;
   }
 
   /* Copy parent's address space */
@@ -341,7 +336,9 @@ pid_t fork(struct intr_frame* f) {
   tid_t tid = thread_create(cur->name, cur->priority, fork_process, helper);
   sema_down(&child_proc->load_sema);
   if (tid == TID_ERROR) {
+    lock_acquire(&cur->pcb->child_list_lock);
     list_remove(&child_proc->elem);
+    lock_release(&cur->pcb->child_list_lock);
     free(child_proc);
     free(helper);
     return -1;

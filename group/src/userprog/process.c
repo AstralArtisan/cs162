@@ -25,26 +25,38 @@ static thread_func start_process NO_RETURN;
 static thread_func start_pthread NO_RETURN;
 static bool load(const char* file_name, void (**eip)(void), void** esp, int argc, char** argv);
 bool setup_thread(void (**eip)(void), void** esp, stub_fun sf, pthread_fun tf, void* arg, int tnum);
+static void* stack_top(int tnum);
+static struct child* find_child_locked(struct process* p, pid_t pid);
+static int alloc_stack(struct process* p);
+static void free_stack(struct process* p, int tnum);
+static void free_stack_pages(struct process* p, int tnum);
+static struct pt* pt_init();
+static struct pt* find_pthread_locked(struct process* p, tid_t tid);
 struct lock filesys_lock;
 
-static void init_pcb(struct process* pcb, struct thread* t) {
+void init_pcb(struct process* pcb, struct thread* t) {
   pcb->pagedir = NULL;
   pcb->main_thread = t;
   strlcpy(pcb->process_name, t->name, sizeof pcb->process_name);
   list_init(&pcb->child_list);
   pcb->child_process = NULL;
+  lock_init(&pcb->child_list_lock);
   pcb->next_fd = 2; // Start assigning fds from 2 (0 and 1 are stdin and stdout)
   list_init(&pcb->open_files);
   pcb->executable_file = NULL;
+  pcb->exiting = false;
+  lock_init(&pcb->exit_lock);
   list_init(&pcb->locks);
   pcb->next_lock = 1;
   lock_init(&pcb->lock_protect);
   list_init(&pcb->semaphores);
   pcb->next_sema = 1;
   lock_init(&pcb->sema_protect);
-  pcb->thread_count = 1;
   pcb->thread_bitmap = bitmap_create(MAX_THREADS);
   bitmap_set_all(pcb->thread_bitmap, false);
+  /* Reserve slot 0 for the main thread (tnum == 0). */
+  if (pcb->thread_bitmap != NULL)
+    bitmap_set(pcb->thread_bitmap, 0, true);
   lock_init(&pcb->thread_lock);
   list_init(&pcb->pt_list);
 }
@@ -84,7 +96,9 @@ struct child* child_init() {
   child_proc->loaded = false;
   sema_init(&child_proc->wait_sema, 0);
   sema_init(&child_proc->load_sema, 0);
+  lock_acquire(&p->child_list_lock);
   list_push_back(&p->child_list, &child_proc->elem);
+  lock_release(&p->child_list_lock);
   return child_proc;
 }
 
@@ -93,9 +107,17 @@ struct child* child_init() {
    to the child process structure if found, NULL otherwise. */
 struct child* find_child(pid_t pid) {
   struct process* p = thread_current()->pcb;
-  struct list_elem* e;
   if (p == NULL)
     return NULL;
+  lock_acquire(&p->child_list_lock);
+  struct child* c = find_child_locked(p, pid);
+  lock_release(&p->child_list_lock);
+  return c;
+}
+
+/* Like find_child(), but caller must hold p->child_list_lock. */
+static struct child* find_child_locked(struct process* p, pid_t pid) {
+  struct list_elem* e;
   for (e = list_begin(&p->child_list); e != list_end(&p->child_list); e = list_next(e)) {
     struct child* c = list_entry(e, struct child, elem);
     if (c->pid == pid)
@@ -150,7 +172,9 @@ pid_t process_execute(const char* file_name) {
   if (!child_proc->loaded)
     tid = TID_ERROR;
   if (tid == TID_ERROR) {
+    lock_acquire(&thread_current()->pcb->child_list_lock);
     list_remove(&child_proc->elem);
+    lock_release(&thread_current()->pcb->child_list_lock);
     free(child_proc);
   } else {
     child_proc->pid = tid;
@@ -201,6 +225,20 @@ static void start_process(void* file_name_) {
     success = load(argv[0], &if_.eip, &if_.esp, argc, argv);
   }
 
+  /* Initialize pt struct as the main thread of a process. */
+  if (success) {
+    struct pt* pt = pt_init();
+    if (pt == NULL) {
+      success = false;
+    } else {
+      pt->tid = t->tid;
+      pt->tnum = 0;
+      lock_acquire(&t->pcb->thread_lock);
+      list_push_back(&t->pcb->pt_list, &pt->elem);
+      lock_release(&t->pcb->thread_lock);
+    }
+  }
+
   /* Handle failure with succesful PCB malloc. Must free the PCB */
   if (!success && pcb_success) {
     // Avoid race where PCB is freed before t->pcb is set to NULL
@@ -236,23 +274,35 @@ static void start_process(void* file_name_) {
    been successfully called for the given PID, returns -1
    immediately, without waiting. */
 int process_wait(pid_t child_pid) {
-  struct child* child = find_child(child_pid);
+  struct process* p = thread_current()->pcb;
+  if (p == NULL)
+    return -1;
+
+  lock_acquire(&p->child_list_lock);
+  struct child* child = find_child_locked(p, child_pid);
   if (child == NULL || child->waiting) {
+    lock_release(&p->child_list_lock);
     return -1;
   }
   child->waiting = true;
-  if (!child->exited) {
+  bool exited = child->exited;
+  lock_release(&p->child_list_lock);
+
+  if (!exited) {
     sema_down(&child->wait_sema); // Wait for child to exit
   }
-  if (child->killed) {
-    child->exit_status = -1;
-    list_remove(&child->elem);
-    free(child);
+
+  lock_acquire(&p->child_list_lock);
+  struct child* cur = find_child_locked(p, child_pid);
+  if (cur == NULL) {
+    lock_release(&p->child_list_lock);
     return -1;
   }
-  int status = child->exit_status;
-  list_remove(&child->elem);
-  free(child);
+  int status = cur->killed ? -1 : cur->exit_status;
+  list_remove(&cur->elem);
+  lock_release(&p->child_list_lock);
+
+  free(cur);
   return status;
 }
 
@@ -268,7 +318,21 @@ void process_exit(void) {
     NOT_REACHED();
   }
 
+  lock_acquire(&cur->pcb->exit_lock);
+  if (cur->pcb->exiting) {
+      lock_release(&cur->pcb->exit_lock);
+      thread_exit();
+  }
+  cur->pcb->exiting = true;
+  lock_release(&cur->pcb->exit_lock);
+
+  if (cur->pcb->child_process != NULL) {
+    int status = cur->pcb->child_process->killed ? -1 : cur->pcb->child_process->exit_status;
+    printf("%s: exit(%d)\n", cur->pcb->process_name, status);
+  }
+
   /* Free the current process's child processes. */
+  lock_acquire(&cur->pcb->child_list_lock);
   if (!list_empty(&cur->pcb->child_list)) {
     for (e = list_begin(&cur->pcb->child_list); e != list_end(&cur->pcb->child_list);) {
       cp = list_entry(e, struct child, elem);
@@ -278,6 +342,7 @@ void process_exit(void) {
       e = next;
     }
   }
+  lock_release(&cur->pcb->child_list_lock);
 
   if (cur->pcb->child_process) {
     cur->pcb->child_process->exited = true;
@@ -802,14 +867,74 @@ bool is_main_thread(struct thread* t, struct process* p) { return p->main_thread
 pid_t get_pid(struct process* p) { return (pid_t)p->main_thread->tid; }
 
 
-
 /* User pthreads implementation. */
+
+/* stack helpers */
+/* If includes vm, this piece of code needs a big change. */
 #define STACK_PAGES 1
 #define STACK_SIZE (STACK_PAGES * PGSIZE)
 
-/* Since bitmap begins after main thread, when we try to get the stack top,
-   we need to skip it, by (tnum + 1) */
-static void* stack_top(int tnum) { return (void*)(PHYS_BASE - (tnum + 1) * STACK_SIZE); }
+/* User stack slot mapping:
+   tnum == 0 is the main thread stack at top of user address space. */
+static void* stack_top(int tnum) { return (void*)(PHYS_BASE - tnum * STACK_SIZE); }
+
+static int alloc_stack(struct process* p) {
+  lock_acquire(&p->thread_lock);
+  /* Slot 0 is reserved for the main thread. */
+  size_t idx = bitmap_scan_and_flip(p->thread_bitmap, 1, 1, false);
+  lock_release(&p->thread_lock);
+  if (idx == BITMAP_ERROR)
+    return -1;
+  return (int)idx;
+}
+
+static void free_stack(struct process* p, int tnum) {
+  lock_acquire(&p->thread_lock);
+  if (tnum > 0)
+    bitmap_set(p->thread_bitmap, tnum, false);
+  lock_release(&p->thread_lock);
+}
+
+/* Unmaps and frees all user pages backing thread stack slot TNUM. */
+static void free_stack_pages(struct process* p, int tnum) {
+  if (p == NULL || p->pagedir == NULL)
+    return;
+
+  uint8_t* top = (uint8_t*)stack_top(tnum);
+  for (int i = 0; i < STACK_PAGES; i++) {
+    uint8_t* upage = top - (i + 1) * PGSIZE;
+    uint8_t* kpage = pagedir_get_page(p->pagedir, upage);
+    if (kpage != NULL) {
+      pagedir_clear_page(p->pagedir, upage);
+      palloc_free_page(kpage);
+    }
+  }
+}
+
+static struct pt* pt_init() {
+  struct pt* t = malloc(sizeof(struct pt));
+  if (t == NULL)
+    return NULL;
+  t->tid = TID_ERROR;
+  t->exited = false;
+  t->joined = false;
+  t->tnum = -1;
+  sema_init(&t->wait_sema, 0);
+  return t;
+}
+
+static struct pt* find_pthread_locked(struct process* p, tid_t tid) {
+  if (p == NULL)
+    return NULL;
+  struct list_elem* e;
+  for (e = list_begin(&p->pt_list); e != list_end(&p->pt_list); e = list_next(e)) {
+    struct pt* t = list_entry(e, struct pt, elem);
+    if (t->tid == tid) {
+      return t;
+    }
+  }
+  return NULL;
+}
 
 /* Creates a new stack for the thread and sets up its arguments.
    Stores the thread's entry point into *EIP and its initial stack
@@ -889,66 +1014,6 @@ struct start_helper {
   bool loaded;
 };
 
-/* stack helpers */
-/* If includes vm, this piece of code needs a big change. */
-
-static int alloc_stack(struct process* p) {
-  lock_acquire(&p->thread_lock);
-  size_t idx = bitmap_scan_and_flip(p->thread_bitmap, 0, 1, false);
-  lock_release(&p->thread_lock);
-  if (idx == BITMAP_ERROR)
-    return -1;
-  return (int)idx;
-}
-
-static void free_stack(struct process* p, int tnum) {
-  lock_acquire(&p->thread_lock);
-  bitmap_set(p->thread_bitmap, tnum, false);
-  lock_release(&p->thread_lock);
-}
-
-/* Unmaps and frees all user pages backing thread stack slot TNUM. */
-static void free_stack_pages(struct process* p, int tnum) {
-  if (p == NULL || p->pagedir == NULL)
-    return;
-
-  uint8_t* top = (uint8_t*)stack_top(tnum);
-  for (int i = 0; i < STACK_PAGES; i++) {
-    uint8_t* upage = top - (i + 1) * PGSIZE;
-    uint8_t* kpage = pagedir_get_page(p->pagedir, upage);
-    if (kpage != NULL) {
-      pagedir_clear_page(p->pagedir, upage);
-      palloc_free_page(kpage);
-    }
-  }
-}
-
-static struct pt* pt_init() {
-  struct pt* t = malloc(sizeof(struct pt));
-  if (t == NULL)
-    return NULL;
-  t->tid = TID_ERROR;
-  t->exited = false;
-  t->joined = false;
-  t->tnum = -1;
-  sema_init(&t->wait_sema, 0);
-  return t;
-}
-
-static struct pt* find_pthread(tid_t tid) {
-  struct process* p = thread_current()->pcb;
-  if (p == NULL)
-    return NULL;
-  struct list_elem* e;
-  for (e = list_begin(&p->pt_list); e != list_end(&p->pt_list); e = list_next(e)) {
-    struct pt* t = list_entry(e, struct pt, elem);
-    if (t->tid == tid) {
-      return t;
-    }
-  }
-  return NULL;
-}
-
 /* Starts a new thread with a new user stack running SF, which takes
    TF and ARG as arguments on its user stack. This new thread may be
    scheduled (and may even exit) before pthread_execute () returns.
@@ -991,11 +1056,15 @@ tid_t pthread_execute(stub_fun sf, pthread_fun tf, void* arg) {
     return TID_ERROR;
   }
   exec_->t->tid = tid;
+  lock_acquire(&p->thread_lock);
   list_push_back(&p->pt_list, &exec_->t->elem);
+  lock_release(&p->thread_lock);
 
   sema_down(&exec_->load_sema);
   if (!exec_->loaded) {
+    lock_acquire(&p->thread_lock);
     list_remove(&exec_->t->elem);
+    lock_release(&p->thread_lock);
     tid = TID_ERROR;
     free_stack(p, tnum);
     free(t);
@@ -1041,19 +1110,54 @@ static void start_pthread(void* exec_) {
    waiting. */
 tid_t pthread_join(tid_t tid) { 
   struct process* p = thread_current()->pcb;
-  struct pt* t = find_pthread(tid);
+  if (p == NULL || tid == thread_current()->tid) {
+    return TID_ERROR;
+  }
+
+  lock_acquire(&p->thread_lock);
+  struct pt* t = find_pthread_locked(p, tid);
   if (t == NULL || t->joined) {
+    lock_release(&p->thread_lock);
     return TID_ERROR;
   }
   t->joined = true;
-  if (!t->exited) {
+  bool exited = t->exited;
+  lock_release(&p->thread_lock);
+
+  if (!exited) {
     sema_down(&t->wait_sema); // Wait for thread to exit
   }
-  free_stack_pages(p, t->tnum);
+
+  lock_acquire(&p->thread_lock);
+  t = find_pthread_locked(p, tid);
+  if (t == NULL) {
+    lock_release(&p->thread_lock);
+    return TID_ERROR;
+  }
+  int tnum = t->tnum;
   list_remove(&t->elem);
-  free_stack(p, t->tnum);
+  lock_release(&p->thread_lock);
+
+  /* Do not free main thread stack here. Slot 0 is reserved and
+     userspace may still hold pointers into the initial stack. */
+  if (tnum != 0) {
+    free_stack_pages(p, tnum);
+    free_stack(p, tnum);
+  }
   free(t);
   return tid;
+}
+
+/* Picks one thread in P that is not SELF_TID.
+   Caller must hold p->thread_lock. */
+static tid_t pick_other_thread_locked(struct process* p, tid_t self_tid) {
+  struct list_elem* e;
+  for (e = list_begin(&p->pt_list); e != list_end(&p->pt_list); e = list_next(e)) {
+    struct pt* t = list_entry(e, struct pt, elem);
+    if (t->tid != self_tid)
+      return t->tid;
+  }
+  return TID_ERROR;
 }
 
 /* Free the current thread's resources. Most resources will
@@ -1065,16 +1169,23 @@ tid_t pthread_join(tid_t tid) {
 void pthread_exit(void) {
   struct thread* cur = thread_current();
   struct process* p = cur->pcb;
-  struct pt* t;
   if (p == NULL) {
     goto exit;
   }
-  t = find_pthread(cur->tid);
-  if (t == NULL) {
-    goto exit;
+  if (is_main_thread(cur, p)) {
+    if (p->child_process != NULL) {
+      p->child_process->exit_status = 0;
+    }
+    pthread_exit_main();
   }
-  t->exited = true;
-  sema_up(&t->wait_sema);
+
+  lock_acquire(&p->thread_lock);
+  struct pt* t = find_pthread_locked(p, cur->tid);
+  if (t != NULL) {
+    t->exited = true;
+    sema_up(&t->wait_sema);
+  }
+  lock_release(&p->thread_lock);
 exit:
   thread_exit();
   NOT_REACHED();
@@ -1091,14 +1202,29 @@ void pthread_exit_main(void) {
   if (p == NULL) {
     return;
   }
-  struct list_elem* e;
-  for (e = list_begin(&p->pt_list); e != list_end(&p->pt_list); e = list_next(e)) {
-    struct pt* t = list_entry(e, struct pt, elem);
-    if (!t->joined) {
-      pthread_join(t->tid);
-    }
+
+  lock_acquire(&p->thread_lock);
+  struct pt* self = find_pthread_locked(p, cur->tid);
+  if (self != NULL) {
+    self->exited = true;
+    sema_up(&self->wait_sema);
   }
-  p->child_process->exit_status = 0;
+  lock_release(&p->thread_lock);
+
+  /* Wait until no other user thread remains in this process. */
+  while (true) {
+    tid_t target;
+    lock_acquire(&p->thread_lock);
+    target = pick_other_thread_locked(p, cur->tid);
+    lock_release(&p->thread_lock);
+
+    if (target == TID_ERROR)
+      break;
+
+    if (pthread_join(target) == TID_ERROR)
+      thread_yield();
+  }
+
   process_exit();
   NOT_REACHED();
 }

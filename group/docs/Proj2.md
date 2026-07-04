@@ -1,6 +1,24 @@
 # Pintos proj2: Thread
 
-[TOC]
+- [Efficient Alarm Clock](#efficient-alarm-clock)
+  - [Timer Overview](#timer-overview)
+  - [Work](#work)
+- [User threads](#user-threads)
+  - [User-level synchronization](#user-level-synchronization)
+    - [Syscall interface](#syscall-interface)
+    - [Thoughts and Construction](#thoughts-and-construction)
+    - [Implementation: Lock](#implementation-lock)
+    - [Implementation: Semaphore](#implementation-semaphore)
+  - [Pthread](#pthread)
+    - [Pthread library](#pthread-library)
+    - [`pthread_create`](#pthread_create)
+    - [`struct pt` and helper functions](#struct-pt-and-helper-functions)
+    - [`setup_thread`](#setup_thread)
+    - [`pthread_execute`](#pthread_execute)
+    - [`start_pthread`](#start_pthread)
+    - [`pthread_join`](#pthread_join)
+    - [`pthread_exit`](#pthread_exit)
+    - [`pthread_exit_main`](#pthread_exit_main)
 
 In project 1, all we do is on user programs, and a "thread" is seemed to be the same as a "user process", with `pcb` in the thread structure. In project 2, we are going to focus on kernel threads, exploring how a multithread system works, and build the scheduler ourselves. We need to use `timer` as the clock of Pintos. With the `ticks` which timer gives us, we have the reference of scheduling.
 

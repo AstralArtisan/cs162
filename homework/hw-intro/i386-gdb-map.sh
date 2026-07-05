@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Must be run in this directory so results are consistent (env vars change later stack addresses)
-EXPECTED_PWD="/home/workspace/code/personal/hw-intro"
+EXPECTED_PWD="/home/workspace/code/homework/hw-intro"
 if [ "$PWD" != "$EXPECTED_PWD" ]; then
     echo "Error: Must run in $EXPECTED_PWD"
     exit 1
